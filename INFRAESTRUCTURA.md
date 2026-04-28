@@ -4,6 +4,42 @@
 
 La plataforma "Shalom Proxy" ha sido rediseñada para funcionar de manera 100% *Serverless*, garantizando alta disponibilidad sin costos base de mantenimiento (pago por uso). La arquitectura se divide en dos capas principales:
 
+```mermaid
+flowchart TD
+    %% Estilos
+    classDef aws fill:#FF9900,stroke:#232F3E,stroke-width:2px,color:#232F3E;
+    classDef github fill:#24292e,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef shalom fill:#0052cc,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef user fill:#10b981,stroke:#064e3b,stroke-width:2px,color:#fff;
+
+    User([👤 Cliente / Admin]):::user
+
+    subgraph GitHub [Repositorio GitHub]
+        Repo[(EduardoAzaldegui/shalom-proyecto)]:::github
+    end
+
+    subgraph AWS_Cloud [☁️ AWS Cloud - Infraestructura Serverless]
+        Amplify[AWS Amplify Hosting<br/>Frontend React]:::aws
+        APIGW[Amazon API Gateway<br/>Proxy Endpoint]:::aws
+        Lambda[AWS Lambda<br/>FastAPI Backend Python 3.9]:::aws
+        DynamoDB[(Amazon DynamoDB<br/>Clients / Admin Tables)]:::aws
+    end
+
+    subgraph External_API [🌐 API Externa]
+        Shalom[API Shalom Oficial<br/>Master API Key]:::shalom
+    end
+
+    %% Relaciones
+    Repo -- "Push a rama main\ntriggerea CI/CD" --> Amplify
+    User -- "HTTPS Request\nApp Web" --> Amplify
+    User -- "HTTPS REST API" --> APIGW
+    Amplify -- "Consultas API\n(Axios / Fetch)" --> APIGW
+    APIGW -- "Invoca función" --> Lambda
+    Lambda -- "CRUD\nBoto3" --> DynamoDB
+    Lambda -- "Peticiones Enrutadas\n(Inyecta Master Key)" --> Shalom
+```
+
+
 ### 1. Frontend (Capa de Presentación)
 - **Servicio:** AWS Amplify Hosting
 - **Repositorio:** GitHub (`EduardoAzaldegui/shalom-proyecto`)
