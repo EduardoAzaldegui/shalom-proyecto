@@ -1,0 +1,91 @@
+service: shalom-proxy-api
+
+provider:
+  name: aws
+  runtime: python3.9
+  region: us-east-1
+  memorySize: 256
+  timeout: 30
+  environment:
+    SHALOM_API_URL: ${env:SHALOM_API_URL, 'https://ecomapp.shalom-api.lat'}
+    SHALOM_API_KEY_MASTER: ${env:SHALOM_API_KEY_MASTER, 'admin-shalom-secret-key-2026'}
+    CLIENTS_TABLE: ${self:service}-clients-${sls:stage}
+    ADMIN_TABLE: ${self:service}-admin-${sls:stage}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+          Resource:
+            - "arn:aws:dynamodb:${aws:region}:*:table/${self:provider.environment.CLIENTS_TABLE}"
+            - "arn:aws:dynamodb:${aws:region}:*:table/${self:provider.environment.CLIENTS_TABLE}/index/*"
+            - "arn:aws:dynamodb:${aws:region}:*:table/${self:provider.environment.ADMIN_TABLE}"
+
+functions:
+  api:
+    handler: main.handler
+    events:
+      - http:
+          path: /
+          method: ANY
+          cors: true
+      - http:
+          path: /{proxy+}
+          method: ANY
+          cors: true
+
+plugins:
+  - serverless-python-requirements
+
+custom:
+  pythonRequirements:
+    dockerizePip: false
+
+resources:
+  Resources:
+    ClientsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.CLIENTS_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+          - AttributeName: magic_token
+            AttributeType: S
+          - AttributeName: api_key
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: MagicTokenIndex
+            KeySchema:
+              - AttributeName: magic_token
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+          - IndexName: ApiKeyIndex
+            KeySchema:
+              - AttributeName: api_key
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+
+    AdminTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.ADMIN_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: username
+            AttributeType: S
+        KeySchema:
+          - AttributeName: username
+            KeyType: HASH
