@@ -9,6 +9,8 @@ export default function AdminPanel() {
   const [clients, setClients] = useState([]);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
+  const [shalomUsername, setShalomUsername] = useState('');
+  const [shalomPassword, setShalomPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
@@ -37,9 +39,16 @@ export default function AdminPanel() {
     e.preventDefault();
     setLoading(true);
     try {
-      await axios.post(`${API_BASE}/admin/clients`, { name, email }, getHeaders());
+      await axios.post(`${API_BASE}/admin/clients`, { 
+        name, 
+        email, 
+        shalom_username: shalomUsername, 
+        shalom_password: shalomPassword 
+      }, getHeaders());
       setName('');
       setEmail('');
+      setShalomUsername('');
+      setShalomPassword('');
       fetchClients();
     } catch (e) {
       alert('Error creating client');
@@ -108,33 +117,57 @@ export default function AdminPanel() {
         <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
           <UserPlus className="w-5 h-5 text-slate-500" /> Nuevo Cliente
         </h2>
-        <form onSubmit={createClient} className="flex gap-4 items-end">
-          <div className="flex-1">
-            <label className="block text-sm font-medium text-slate-700 mb-1">Nombre</label>
-            <input 
-              required
-              type="text" 
-              value={name} onChange={e => setName(e.target.value)}
-              className="w-full rounded-md border border-slate-300 px-4 py-2 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
-              placeholder="Empresa S.A."
-            />
+        <form onSubmit={createClient} className="flex flex-col gap-4">
+          <div className="flex gap-4 items-end">
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-slate-700 mb-1">Nombre Comercial</label>
+              <input 
+                required
+                type="text" 
+                value={name} onChange={e => setName(e.target.value)}
+                className="w-full rounded-md border border-slate-300 px-4 py-2 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
+                placeholder="Empresa S.A."
+              />
+            </div>
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-slate-700 mb-1">Email de Contacto</label>
+              <input 
+                required
+                type="email" 
+                value={email} onChange={e => setEmail(e.target.value)}
+                className="w-full rounded-md border border-slate-300 px-4 py-2 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
+                placeholder="contacto@empresa.com"
+              />
+            </div>
           </div>
-          <div className="flex-1">
-            <label className="block text-sm font-medium text-slate-700 mb-1">Email</label>
-            <input 
-              required
-              type="email" 
-              value={email} onChange={e => setEmail(e.target.value)}
-              className="w-full rounded-md border border-slate-300 px-4 py-2 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
-              placeholder="contacto@empresa.com"
-            />
+          <div className="flex gap-4 items-end">
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-slate-700 mb-1">Usuario Shalom Pro</label>
+              <input 
+                required
+                type="text" 
+                value={shalomUsername} onChange={e => setShalomUsername(e.target.value)}
+                className="w-full rounded-md border border-slate-300 px-4 py-2 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
+                placeholder="usuario@empresa.com"
+              />
+            </div>
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-slate-700 mb-1">Contraseña Shalom Pro</label>
+              <input 
+                required
+                type="password" 
+                value={shalomPassword} onChange={e => setShalomPassword(e.target.value)}
+                className="w-full rounded-md border border-slate-300 px-4 py-2 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
+                placeholder="••••••••"
+              />
+            </div>
+            <button 
+              disabled={loading}
+              className="bg-indigo-600 text-white px-6 py-2 rounded-md font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors h-[42px]"
+            >
+              {loading ? 'Creando...' : 'Crear Instancia'}
+            </button>
           </div>
-          <button 
-            disabled={loading}
-            className="bg-indigo-600 text-white px-6 py-2 rounded-md font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors"
-          >
-            {loading ? 'Creando...' : 'Crear Instancia'}
-          </button>
         </form>
       </div>
 

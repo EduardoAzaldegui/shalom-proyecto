@@ -49,7 +49,7 @@ def verify_admin(username, password):
         print(f"Error verifying admin: {e}")
     return False
 
-def create_client(name, email, instance_id, api_key):
+def create_client(name, email, instance_id, api_key, shalom_username, shalom_password):
     table = get_clients_table()
     client_id = str(uuid.uuid4())
     magic_token = str(uuid.uuid4())
@@ -60,6 +60,8 @@ def create_client(name, email, instance_id, api_key):
         'id': client_id,
         'name': name,
         'email': email,
+        'shalom_username': shalom_username,
+        'shalom_password': shalom_password,
         'magic_token': magic_token,
         'token_expires_at': expires_at,
         'instance_id': instance_id,

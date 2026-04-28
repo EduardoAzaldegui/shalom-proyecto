@@ -60,6 +60,8 @@ class AdminLogin(BaseModel):
 class ClientCreate(BaseModel):
     name: str
     email: str
+    shalom_username: str
+    shalom_password: str
 
 class MagicLogin(BaseModel):
     token: str
@@ -100,12 +102,24 @@ def create_client(client: ClientCreate, is_admin: bool = Depends(verify_admin_to
             raise HTTPException(status_code=400, detail="Failed to create instance in Shalom")
         instance_id = data.get("instanceId")
         api_key = data.get("apiKey")
-        client_id, magic_token = database.create_client(client.name, client.email, instance_id, api_key)
+
+        # Perform initial login
+        login_payload = {
+            "instanceId": instance_id,
+            "username": client.shalom_username,
+            "password": client.shalom_password
+        }
+        login_resp = requests.post(f"{SHALOM_API_URL}/login", headers=headers, json=login_payload, timeout=15)
+        if login_resp.status_code not in (200, 201):
+            # Rollback instance
+            requests.delete(f"{SHALOM_API_URL}/instances", headers=headers, json={"instanceId": instance_id})
+            raise HTTPException(status_code=400, detail="Credenciales de Shalom inválidas.")
+
+        client_id, magic_token = database.create_client(client.name, client.email, instance_id, api_key, client.shalom_username, client.shalom_password)
         return {
             "message": "Client created successfully",
             "client_id": client_id,
-            "magic_token": magic_token,
-            "magic_link": f"http://localhost:5173/docs?token={magic_token}"
+            "magic_token": magic_token
         }
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=500, detail=f"Shalom API error: {str(e)}")
@@ -119,8 +133,7 @@ def regenerate_token(client_id: str, is_admin: bool = Depends(verify_admin_token
     new_token = database.regenerate_magic_token(client_id)
     return {
         "message": "Token regenerated",
-        "magic_token": new_token,
-        "magic_link": f"http://localhost:5173/docs?token={new_token}"
+        "magic_token": new_token
     }
 class StatusUpdate(BaseModel):
     status: str
@@ -198,6 +211,29 @@ def magic_login(payload: MagicLogin):
             "apiKey": client["api_key"]
         }
     }
+
+@app.post("/auth/refresh-session")
+def refresh_shalom_session(payload: MagicLogin):
+    client = database.get_client_by_token(payload.token)
+    if not client:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    headers = {
+        "x-api-key": SHALOM_API_KEY_MASTER,
+        "Content-Type": "application/json"
+    }
+    login_payload = {
+        "instanceId": client["instance_id"],
+        "username": client["shalom_username"],
+        "password": client["shalom_password"]
+    }
+    try:
+        resp = requests.post(f"{SHALOM_API_URL}/login", headers=headers, json=login_payload, timeout=15)
+        if resp.status_code in (200, 201):
+            return {"success": True, "message": "Sesión de Shalom refrescada correctamente."}
+        raise HTTPException(status_code=400, detail="No se pudo refrescar la sesión en Shalom.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ─────────────────────────────────────────────
@@ -278,10 +314,15 @@ def proxy_request(req: ProxyRequest, x_api_key: str = Header(None)):
 
     # 4. Inyectar instanceId en el body si el endpoint lo requiere
     body = dict(req.body) if req.body else {}
-    INSTANCE_PATHS = {"/login", "/logout", "/register-individual", "/register",
+    INSTANCE_PATHS = {"/register-individual", "/register",
                       "/pending-shipments", "/get-user", "/update-password",
                       "/update-contact-1", "/update-contact-2", "/quote",
                       "/ticket-image", "/ticket-pdf", "/label"}
+    
+    # Bloquear acceso a /login y /logout desde el proxy
+    if req.path in ["/login", "/logout"]:
+        raise HTTPException(status_code=403, detail="El proxy gestiona la autenticación automáticamente. Usa /refresh-session si necesitas renovar.")
+
     if req.path in INSTANCE_PATHS:
         body["instanceId"] = client["instance_id"]
 

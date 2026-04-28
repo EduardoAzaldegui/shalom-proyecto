@@ -12,7 +12,7 @@ const SHALOM_API_URL = 'https://ecomapp.shalom-api.lat';
 const MASTER_KEY_PATHS = new Set(['/quote', '/track', '/track-massive', '/ticket-image', '/ticket-pdf', '/label']);
 
 const ENDPOINT_GROUPS = {
-  'Autenticación': ['/login', '/logout'],
+  'Autenticación (Proxy)': ['/auth/refresh-session'],
   'Envíos y Cotización': ['/register-individual', '/register', '/quote', '/pending-shipments'],
   'Rastreo y Etiquetas': ['/track', '/track-massive', '/ticket-image', '/ticket-pdf', '/label'],
   'Catálogo y Referencia': ['/terminals'],
@@ -26,8 +26,7 @@ const WARNINGS = {
 };
 
 const DYNAMIC_EXPLANATIONS = {
-  '/login': 'Inicia sesión con credenciales de Shalom Pro. La sesión se mantiene activa para las llamadas siguientes. Retorna la URL del panel.',
-  '/logout': 'Cierra la sesión activa y limpia la cookie de sesión en el servidor.',
+  '/auth/refresh-session': 'Renueva la sesión de Shalom automáticamente usando las credenciales seguras de tu instancia. Útil si recibes un error 401 (No Autorizado) de Shalom.',
   '/register-individual': '✅ VALIDADO: Crea una orden de envío individual. Usa campos en español: origen/destino con ter_id numérico. Retorna código de rastreo (4 letras) y número de guía.',
   '/register': 'Registra envíos en lote (múltiples shipments en un call). El campo origin del array espera el ter_id numérico de la terminal.',
   '/track': 'Obtiene el estado de un envío en tránsito. OJO: Sólo funciona si el paquete ya fue depositado y pistoleado en agencia. Requiere orderNumber (número de guía) y orderCode (código corto).',
@@ -63,10 +62,9 @@ const REAL_RESPONSES = {
     "message": "Orden de envío creada con exito!",
     "data": { "codigo": "9WWH", "guia": 79417376, "serie": "V267", "ose_id": 82891360, "precio": 8 }
   },
-  '/login': {
-    "success": true, "message": "Already logged in", "url": "https://pro.shalom.pe/#/envios/list"
+  '/auth/refresh-session': {
+    "success": true, "message": "Sesión de Shalom refrescada correctamente."
   },
-  '/logout': { "success": true, "message": "Logged out and session cleared" },
   '/pending-shipments': {
     "0": {
       "id": 979398,
@@ -239,16 +237,22 @@ export default function ClientDocs() {
     }
 
     try {
-      const res = await axios.post(`${API_BASE}/proxy`, {
-        method: method,
-        path: activePath,
-        body: parsedBody
-      }, {
-        headers: {
-          'x-api-key': clientData.apiKey
-        }
-      });
-      setLiveResponse(cleanResponse(res.data));
+      if (activePath.startsWith('/auth/')) {
+        // Ejecutar contra el backend propio, no por proxy
+        const res = await axios.post(`${API_BASE}${activePath}`, { token });
+        setLiveResponse(cleanResponse(res.data));
+      } else {
+        const res = await axios.post(`${API_BASE}/proxy`, {
+          method: method,
+          path: activePath,
+          body: parsedBody
+        }, {
+          headers: {
+            'x-api-key': clientData.apiKey
+          }
+        });
+        setLiveResponse(cleanResponse(res.data));
+      }
     } catch (e) {
       const errData = e.response?.data || { error: 'Network Error o timeout.' };
       setLiveResponse(cleanResponse(errData));
@@ -331,10 +335,14 @@ export default function ClientDocs() {
     // Para el resto de endpoints (Opción B):
     // Mostramos la petición DIRECTA a la API de Shalom usando su apiKey.
     
-    // Inyectamos instanceId en el ejemplo si no está
-    const INSTANCE_PATHS = new Set(["/login", "/logout", "/register-individual", "/register", "/pending-shipments", "/get-user", "/update-password", "/update-contact-1", "/update-contact-2"]);
+    const INSTANCE_PATHS = new Set(["/register-individual", "/register", "/pending-shipments", "/get-user", "/update-password", "/update-contact-1", "/update-contact-2"]);
     if (INSTANCE_PATHS.has(activePath)) {
       bodyExample.instanceId = clientData.instanceId;
+    }
+
+    // Si es nuestro propio endpoint (auth/refresh-session)
+    if (activePath.startsWith('/auth/')) {
+      return `# 🔐 AUTENTICACIÓN PROXY\n# Refresca la sesión de Shalom en el servidor proxy.\n\ncurl -X POST ${API_BASE}${activePath} \\\n  -H "Content-Type: application/json" \\\n  -d '{\n  "token": "${token}"\n}'`;
     }
 
     let curlCmd = `curl -X ${currentMethod.toUpperCase()} ${SHALOM_API_URL}${activePath} \\\n  -H "x-api-key: ${clientData.apiKey}" \\\n  -H "Content-Type: application/json"`;
