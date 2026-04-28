@@ -12,6 +12,8 @@ export default function AdminPanel() {
   const [shalomUsername, setShalomUsername] = useState('');
   const [shalomPassword, setShalomPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [successMessage, setSuccessMessage] = useState('');
   const navigate = useNavigate();
 
   const getHeaders = () => {
@@ -38,6 +40,8 @@ export default function AdminPanel() {
   const createClient = async (e) => {
     e.preventDefault();
     setLoading(true);
+    setErrorMessage('');
+    setSuccessMessage('');
     try {
       await axios.post(`${API_BASE}/admin/clients`, { 
         name, 
@@ -49,9 +53,10 @@ export default function AdminPanel() {
       setEmail('');
       setShalomUsername('');
       setShalomPassword('');
+      setSuccessMessage('¡Cliente creado e instanciado en Shalom exitosamente!');
       fetchClients();
     } catch (e) {
-      alert('Error creating client');
+      setErrorMessage(e.response?.data?.detail || e.message || 'Error al crear el cliente');
     }
     setLoading(false);
   };
@@ -112,6 +117,20 @@ export default function AdminPanel() {
           <LogOut className="w-4 h-4" /> Cerrar Sesión
         </button>
       </div>
+
+      {errorMessage && (
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-6 flex justify-between items-center">
+          <p className="font-medium">{errorMessage}</p>
+          <button onClick={() => setErrorMessage('')} className="text-red-500 font-bold hover:text-red-800">&times;</button>
+        </div>
+      )}
+
+      {successMessage && (
+        <div className="bg-emerald-50 border border-emerald-200 text-emerald-700 px-4 py-3 rounded-lg mb-6 flex justify-between items-center">
+          <p className="font-medium">{successMessage}</p>
+          <button onClick={() => setSuccessMessage('')} className="text-emerald-500 font-bold hover:text-emerald-800">&times;</button>
+        </div>
+      )}
 
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 mb-8">
         <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">

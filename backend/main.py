@@ -148,7 +148,7 @@ def update_status(client_id: str, payload: StatusUpdate, is_admin: bool = Depend
         try:
             requests.delete(f"{SHALOM_API_URL}/instances", 
                           headers={"x-api-key": SHALOM_API_KEY_MASTER, "Content-Type": "application/json"},
-                          json={"instanceId": client["instance_id"]}, timeout=15)
+                          json={"instanceId": client.get("instance_id")}, timeout=15)
         except Exception as e:
             print(f"Error deleting instance: {e}")
         database.update_client_status(client_id, "inactive")
@@ -164,6 +164,13 @@ def update_status(client_id: str, payload: StatusUpdate, is_admin: bool = Depend
                 new_instance = data.get("instanceId")
                 new_api = data.get("apiKey")
                 if new_instance and new_api:
+                    # Log in again to bind the new instance
+                    login_payload = {
+                        "instanceId": new_instance,
+                        "username": client.get("shalom_username", ""),
+                        "password": client.get("shalom_password", "")
+                    }
+                    requests.post(f"{SHALOM_API_URL}/login", headers={"x-api-key": SHALOM_API_KEY_MASTER, "Content-Type": "application/json"}, json=login_payload, timeout=15)
                     database.update_client_credentials(client_id, new_instance, new_api)
         except Exception as e:
             print(f"Error creating instance: {e}")
@@ -178,11 +185,11 @@ def delete_client(client_id: str, is_admin: bool = Depends(verify_admin_token)):
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
         
-    if client.get("status") == "active":
+    if client.get("status") == "active" and client.get("instance_id"):
         try:
             requests.delete(f"{SHALOM_API_URL}/instances", 
                           headers={"x-api-key": SHALOM_API_KEY_MASTER, "Content-Type": "application/json"},
-                          json={"instanceId": client["instance_id"]}, timeout=15)
+                          json={"instanceId": client.get("instance_id")}, timeout=15)
         except:
             pass
             
@@ -223,9 +230,9 @@ def refresh_shalom_session(payload: MagicLogin):
         "Content-Type": "application/json"
     }
     login_payload = {
-        "instanceId": client["instance_id"],
-        "username": client["shalom_username"],
-        "password": client["shalom_password"]
+        "instanceId": client.get("instance_id"),
+        "username": client.get("shalom_username", ""),
+        "password": client.get("shalom_password", "")
     }
     try:
         resp = requests.post(f"{SHALOM_API_URL}/login", headers=headers, json=login_payload, timeout=15)
@@ -324,7 +331,7 @@ def proxy_request(req: ProxyRequest, x_api_key: str = Header(None)):
         raise HTTPException(status_code=403, detail="El proxy gestiona la autenticación automáticamente. Usa /refresh-session si necesitas renovar.")
 
     if req.path in INSTANCE_PATHS:
-        body["instanceId"] = client["instance_id"]
+        body["instanceId"] = client.get("instance_id")
 
     # 5. Llamar a Shalom
     url = f"{SHALOM_API_URL}{req.path}"
