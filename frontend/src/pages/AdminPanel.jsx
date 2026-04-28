@@ -3,7 +3,7 @@ import axios from 'axios';
 import { Copy, RefreshCw, Key, UserPlus, LogOut, Trash2, Power, PowerOff } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
-const API_BASE = 'https://9lrgs4st13.execute-api.us-east-1.amazonaws.com/dev';
+const API_BASE = import.meta.env.VITE_API_BASE || 'https://9lrgs4st13.execute-api.us-east-1.amazonaws.com/dev';
 
 export default function AdminPanel() {
   const [clients, setClients] = useState([]);
@@ -150,7 +150,7 @@ export default function AdminPanel() {
           </thead>
           <tbody className="divide-y divide-slate-100">
             {clients.map(c => {
-              const magicLink = `http://localhost:5173/docs?token=${c.magic_token}`;
+              const magicLink = `${window.location.origin}/docs?token=${c.magic_token}`;
               return (
                 <tr key={c.id} className={`hover:bg-slate-50/50 ${c.status === 'inactive' ? 'opacity-60 bg-slate-50' : ''}`}>
                   <td className="px-6 py-4">

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { Lock, User, KeyRound } from 'lucide-react';
 
-const API_BASE = 'https://9lrgs4st13.execute-api.us-east-1.amazonaws.com/dev';
+const API_BASE = import.meta.env.VITE_API_BASE || 'https://9lrgs4st13.execute-api.us-east-1.amazonaws.com/dev';
 
 export default function AdminLogin() {
   const [username, setUsername] = useState('');

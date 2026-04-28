@@ -4,7 +4,7 @@ import axios from 'axios';
 import { Terminal, Key, Copy, CheckCircle2, Server, BookOpen, Play, AlertTriangle, FileJson, Loader2 } from 'lucide-react';
 import Editor from '@monaco-editor/react';
 
-const API_BASE = 'https://9lrgs4st13.execute-api.us-east-1.amazonaws.com/dev';
+const API_BASE = import.meta.env.VITE_API_BASE || 'https://9lrgs4st13.execute-api.us-east-1.amazonaws.com/dev';
 const SHALOM_API_URL = 'https://ecomapp.shalom-api.lat';
 
 // Endpoints enrutados via nuestro proxy (inyectan Master Key internamente).
