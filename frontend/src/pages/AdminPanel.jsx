@@ -176,7 +176,7 @@ export default function AdminPanel() {
           <thead>
             <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 text-sm">
               <th className="px-6 py-3 font-medium">Cliente</th>
-              <th className="px-6 py-3 font-medium">Shalom Instance ID</th>
+              <th className="px-6 py-3 font-medium">Credenciales Shalom Pro</th>
               <th className="px-6 py-3 font-medium">Link Mágico de Docs</th>
               <th className="px-6 py-3 font-medium text-right">Acciones</th>
             </tr>
@@ -193,8 +193,13 @@ export default function AdminPanel() {
                     </div>
                     <div className="text-sm text-slate-500 ml-4">{c.email}</div>
                   </td>
-                  <td className="px-6 py-4 text-sm font-mono text-slate-500">
-                    {c.instance_id ? c.instance_id.substring(0,8) + '...' : 'Sin Instancia'}
+                  <td className="px-6 py-4">
+                    <div className="font-semibold text-slate-700 text-sm">
+                      {c.shalom_username || <span className="text-slate-400 italic">Sin usuario asignado</span>}
+                    </div>
+                    <div className="text-xs font-mono text-slate-500 mt-1">
+                      ID: {c.instance_id ? c.instance_id.substring(0,8) + '...' : 'N/A'}
+                    </div>
                   </td>
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-2">

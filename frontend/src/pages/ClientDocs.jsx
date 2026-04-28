@@ -146,7 +146,7 @@ export default function ClientDocs() {
   const [clientData, setClientData] = useState(null);
   const [swagger, setSwagger] = useState(null);
   const [error, setError] = useState('');
-  const [activePath, setActivePath] = useState('/login');
+  const [activePath, setActivePath] = useState('/auth/refresh-session');
   const [copied, setCopied] = useState(null);
   const [viewMode, setViewMode] = useState('reference');
   const [liveResponse, setLiveResponse] = useState(null);
