@@ -516,64 +516,7 @@ export default function ClientDocs() {
             </p>
           </div>
 
-          {/* ──────── TERMINALS SPECIAL VIEW ──────── */}
-          {activePath === '/terminals' ? (
-            <div>
-              <div className="flex items-center gap-4 mb-6">
-                <input
-                  type="text"
-                  value={terminalsSearch}
-                  onChange={e => setTerminalsSearch(e.target.value)}
-                  placeholder="Buscar por ciudad o terminal..."
-                  className="flex-1 px-4 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white shadow-sm"
-                />
-                <button
-                  onClick={executeRequest}
-                  disabled={isExecuting}
-                  className="bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-bold px-5 py-2.5 rounded-xl flex items-center gap-2 transition-colors disabled:opacity-50"
-                >
-                  <Server className="w-4 h-4" /> Buscar en Vivo
-                </button>
-              </div>
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                <div className="px-5 py-4 border-b border-slate-100 bg-slate-50 flex items-center gap-2">
-                  <Server className="w-4 h-4 text-indigo-500" />
-                  <h3 className="text-sm font-bold text-slate-700">Terminales Shalom — Catálogo de ter_id</h3>
-                  <span className="ml-auto text-xs text-slate-400">{terminals.filter(t => !terminalsSearch || (t.name || '').toLowerCase().includes(terminalsSearch.toLowerCase()) || (t.ubigeo || '').toLowerCase().includes(terminalsSearch.toLowerCase())).length} terminales</span>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm border-collapse">
-                    <thead className="bg-slate-50 border-b border-slate-200">
-                      <tr className="text-[11px] text-slate-500 uppercase tracking-widest">
-                        <th className="px-5 py-3 text-left font-semibold w-20">ter_id</th>
-                        <th className="px-5 py-3 text-left font-semibold">Terminal</th>
-                        <th className="px-5 py-3 text-left font-semibold">Ubicación (Departamento - Provincia - Distrito)</th>
-                        <th className="px-5 py-3 text-left font-semibold w-16">Abrev.</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {terminals
-                        .filter(t => !terminalsSearch || (t.name || '').toLowerCase().includes(terminalsSearch.toLowerCase()) || (t.ubigeo || '').toLowerCase().includes(terminalsSearch.toLowerCase()))
-                        .map(t => (
-                          <tr key={t.ter_id} className="hover:bg-indigo-50/40 transition-colors">
-                            <td className="px-5 py-3 font-mono font-bold text-indigo-700 text-base">{t.ter_id}</td>
-                            <td className="px-5 py-3 font-semibold text-slate-800">{t.name}</td>
-                            <td className="px-5 py-3 text-slate-500">{t.ubigeo}</td>
-                            <td className="px-5 py-3 font-mono text-slate-400 text-xs">{t.abbr}</td>
-                          </tr>
-                        ))}
-                    </tbody>
-                  </table>
-                </div>
-                <div className="px-5 py-3 bg-amber-50 border-t border-amber-100">
-                  <p className="text-xs text-amber-700">
-                    <strong>¿Cómo usar este catálogo?</strong> Copia el <code className="font-mono bg-amber-200 px-1 rounded">ter_id</code> de la terminal que necesitas y úsalo en el campo <code className="font-mono bg-amber-200 px-1 rounded">origen</code> o <code className="font-mono bg-amber-200 px-1 rounded">destino</code> de <code className="font-mono bg-amber-200 px-1 rounded">/register-individual</code>.
-                    El catálogo mostrado proviene del backend de tu instancia. Para ver terminales adicionales, consulta a tu ejecutivo Shalom.
-                  </p>
-                </div>
-              </div>
-            </div>
-          ) : (
+          {/* ──────── STANDARD VIEW ──────── */}
           <div className="grid grid-cols-12 gap-8">
             {/* Left Column: Docs */}
             <div className="col-span-6 space-y-6">
@@ -829,10 +772,8 @@ export default function ClientDocs() {
                   </div>
                 </div>
               )}
-
             </div>
           </div>
-          )} {/* end terminals ternary */}
         </main>
       </div>
     </div>
