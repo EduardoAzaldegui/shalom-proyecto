@@ -65,7 +65,6 @@ export default function AdminPanel() {
   };
 
   const regenerateToken = async (clientId) => {
-    if (!confirm('Are you sure? The old magic link will stop working.')) return;
     setActionLoading({ id: clientId, action: 'regenerate' });
     const toastId = toast.loading('Regenerando link mágico...');
     try {
@@ -82,7 +81,6 @@ export default function AdminPanel() {
   const toggleStatus = async (clientId, currentStatus) => {
     const newStatus = currentStatus === 'active' ? 'inactive' : 'active';
     const actionName = currentStatus === 'active' ? 'deshabilitar' : 'habilitar';
-    if (!confirm(`¿Estás seguro de que deseas ${actionName} a este cliente? Esto modificará su instancia en Shalom.`)) return;
     setActionLoading({ id: clientId, action: 'toggle' });
     const toastId = toast.loading(`Procediendo a ${actionName} cliente...`);
     try {
@@ -97,7 +95,6 @@ export default function AdminPanel() {
   };
 
   const deleteClient = async (clientId) => {
-    if (!confirm('¡PELIGRO! ¿Estás totalmente seguro de eliminar este cliente? Se borrará su instancia de Shalom y perderá todo el acceso.')) return;
     setActionLoading({ id: clientId, action: 'delete' });
     const toastId = toast.loading('Eliminando cliente en Shalom...');
     try {
