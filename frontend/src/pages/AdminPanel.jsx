@@ -63,11 +63,14 @@ export default function AdminPanel() {
 
   const regenerateToken = async (clientId) => {
     if (!confirm('Are you sure? The old magic link will stop working.')) return;
+    setErrorMessage('');
+    setSuccessMessage('');
     try {
       await axios.post(`${API_BASE}/admin/clients/${clientId}/regenerate-token`, {}, getHeaders());
+      setSuccessMessage('Token regenerado exitosamente.');
       fetchClients();
     } catch (e) {
-      alert('Error regenerating token');
+      setErrorMessage(e.response?.data?.detail || e.message || 'Error al regenerar token');
     }
   };
 
@@ -75,21 +78,27 @@ export default function AdminPanel() {
     const newStatus = currentStatus === 'active' ? 'inactive' : 'active';
     const action = currentStatus === 'active' ? 'deshabilitar' : 'habilitar';
     if (!confirm(`¿Estás seguro de que deseas ${action} a este cliente? Esto modificará su instancia en Shalom.`)) return;
+    setErrorMessage('');
+    setSuccessMessage('');
     try {
       await axios.put(`${API_BASE}/admin/clients/${clientId}/status`, { status: newStatus }, getHeaders());
+      setSuccessMessage(`Cliente ${action}do exitosamente.`);
       fetchClients();
     } catch (e) {
-      alert(`Error al ${action} el cliente: ` + (e.response?.data?.detail || e.message));
+      setErrorMessage(`Error al ${action} el cliente: ` + (e.response?.data?.detail || e.message));
     }
   };
 
   const deleteClient = async (clientId) => {
     if (!confirm('¡PELIGRO! ¿Estás totalmente seguro de eliminar este cliente? Se borrará su instancia de Shalom y perderá todo el acceso.')) return;
+    setErrorMessage('');
+    setSuccessMessage('');
     try {
       await axios.delete(`${API_BASE}/admin/clients/${clientId}`, getHeaders());
+      setSuccessMessage('Cliente eliminado permanentemente.');
       fetchClients();
     } catch (e) {
-      alert('Error eliminando cliente: ' + (e.response?.data?.detail || e.message));
+      setErrorMessage('Error eliminando cliente: ' + (e.response?.data?.detail || e.message));
     }
   };
 
