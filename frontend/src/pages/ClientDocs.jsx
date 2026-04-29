@@ -278,9 +278,9 @@ export default function ClientDocs() {
   );
 
   const currentEndpoint = swagger.paths[activePath];
-  // /terminals is our own backend endpoint, not in swagger
-  if (!currentEndpoint && activePath !== '/terminals') return null;
-  const currentMethod = currentEndpoint ? Object.keys(currentEndpoint)[0] : 'get';
+  // /terminals and /auth/refresh-session are our own backend endpoints, not in swagger
+  if (!currentEndpoint && activePath !== '/terminals' && !activePath.startsWith('/auth/')) return null;
+  const currentMethod = currentEndpoint ? Object.keys(currentEndpoint)[0] : 'post';
   const endpointDetails = currentEndpoint ? currentEndpoint[currentMethod] : {};
 
   const getFlatProperties = (schemaProperties, requiredList = [], parentKey = '') => {
@@ -378,7 +378,7 @@ export default function ClientDocs() {
           <div className="py-5">
             {Object.entries(ENDPOINT_GROUPS).map(([groupName, paths]) => {
               // Include paths that are in swagger OR are our own backend endpoints
-              const OWN_PATHS = ['/terminals'];
+              const OWN_PATHS = ['/terminals', '/auth/refresh-session'];
               const availablePaths = paths.filter(p => swagger.paths[p] || OWN_PATHS.includes(p));
               if (availablePaths.length === 0) return null;
               
