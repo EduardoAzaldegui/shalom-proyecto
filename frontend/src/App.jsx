@@ -11,9 +11,12 @@ function ProtectedRoute({ children }) {
   return children;
 }
 
+import { Toaster } from 'sonner';
+
 function App() {
   return (
     <Router>
+      <Toaster richColors position="top-right" />
       <div className="min-h-screen bg-slate-50">
         <Routes>
           <Route path="/login" element={<AdminLogin />} />

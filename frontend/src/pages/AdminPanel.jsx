@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Copy, RefreshCw, Key, UserPlus, LogOut, Trash2, Power, PowerOff } from 'lucide-react';
+import { Copy, RefreshCw, Key, UserPlus, LogOut, Trash2, Power, PowerOff, Loader2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'https://9lrgs4st13.execute-api.us-east-1.amazonaws.com/dev';
 
@@ -12,8 +13,8 @@ export default function AdminPanel() {
   const [shalomUsername, setShalomUsername] = useState('');
   const [shalomPassword, setShalomPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  const [errorMessage, setErrorMessage] = useState('');
-  const [successMessage, setSuccessMessage] = useState('');
+  const [fetchingClients, setFetchingClients] = useState(true);
+  const [actionLoading, setActionLoading] = useState(null);
   const navigate = useNavigate();
 
   const getHeaders = () => {
@@ -29,7 +30,9 @@ export default function AdminPanel() {
       if (e.response?.status === 401) {
         handleLogout();
       }
-      console.error(e);
+      toast.error('Error cargando la lista de clientes');
+    } finally {
+      setFetchingClients(false);
     }
   };
 
@@ -40,8 +43,7 @@ export default function AdminPanel() {
   const createClient = async (e) => {
     e.preventDefault();
     setLoading(true);
-    setErrorMessage('');
-    setSuccessMessage('');
+    const toastId = toast.loading('Creando instancia en Shalom...');
     try {
       await axios.post(`${API_BASE}/admin/clients`, { 
         name, 
@@ -53,52 +55,59 @@ export default function AdminPanel() {
       setEmail('');
       setShalomUsername('');
       setShalomPassword('');
-      setSuccessMessage('¡Cliente creado e instanciado en Shalom exitosamente!');
+      toast.success('¡Cliente creado e instanciado en Shalom exitosamente!', { id: toastId });
       fetchClients();
     } catch (e) {
-      setErrorMessage(e.response?.data?.detail || e.message || 'Error al crear el cliente');
+      toast.error(e.response?.data?.detail || e.message || 'Error al crear el cliente', { id: toastId });
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const regenerateToken = async (clientId) => {
     if (!confirm('Are you sure? The old magic link will stop working.')) return;
-    setErrorMessage('');
-    setSuccessMessage('');
+    setActionLoading({ id: clientId, action: 'regenerate' });
+    const toastId = toast.loading('Regenerando link mágico...');
     try {
       await axios.post(`${API_BASE}/admin/clients/${clientId}/regenerate-token`, {}, getHeaders());
-      setSuccessMessage('Token regenerado exitosamente.');
+      toast.success('Token regenerado exitosamente.', { id: toastId });
       fetchClients();
     } catch (e) {
-      setErrorMessage(e.response?.data?.detail || e.message || 'Error al regenerar token');
+      toast.error(e.response?.data?.detail || e.message || 'Error al regenerar token', { id: toastId });
+    } finally {
+      setActionLoading(null);
     }
   };
 
   const toggleStatus = async (clientId, currentStatus) => {
     const newStatus = currentStatus === 'active' ? 'inactive' : 'active';
-    const action = currentStatus === 'active' ? 'deshabilitar' : 'habilitar';
-    if (!confirm(`¿Estás seguro de que deseas ${action} a este cliente? Esto modificará su instancia en Shalom.`)) return;
-    setErrorMessage('');
-    setSuccessMessage('');
+    const actionName = currentStatus === 'active' ? 'deshabilitar' : 'habilitar';
+    if (!confirm(`¿Estás seguro de que deseas ${actionName} a este cliente? Esto modificará su instancia en Shalom.`)) return;
+    setActionLoading({ id: clientId, action: 'toggle' });
+    const toastId = toast.loading(`Procediendo a ${actionName} cliente...`);
     try {
       await axios.put(`${API_BASE}/admin/clients/${clientId}/status`, { status: newStatus }, getHeaders());
-      setSuccessMessage(`Cliente ${action}do exitosamente.`);
+      toast.success(`Cliente ${actionName}do exitosamente.`, { id: toastId });
       fetchClients();
     } catch (e) {
-      setErrorMessage(`Error al ${action} el cliente: ` + (e.response?.data?.detail || e.message));
+      toast.error(`Error al ${actionName} el cliente: ` + (e.response?.data?.detail || e.message), { id: toastId });
+    } finally {
+      setActionLoading(null);
     }
   };
 
   const deleteClient = async (clientId) => {
     if (!confirm('¡PELIGRO! ¿Estás totalmente seguro de eliminar este cliente? Se borrará su instancia de Shalom y perderá todo el acceso.')) return;
-    setErrorMessage('');
-    setSuccessMessage('');
+    setActionLoading({ id: clientId, action: 'delete' });
+    const toastId = toast.loading('Eliminando cliente en Shalom...');
     try {
       await axios.delete(`${API_BASE}/admin/clients/${clientId}`, getHeaders());
-      setSuccessMessage('Cliente eliminado permanentemente.');
+      toast.success('Cliente eliminado permanentemente.', { id: toastId });
       fetchClients();
     } catch (e) {
-      setErrorMessage('Error eliminando cliente: ' + (e.response?.data?.detail || e.message));
+      toast.error('Error eliminando cliente: ' + (e.response?.data?.detail || e.message), { id: toastId });
+    } finally {
+      setActionLoading(null);
     }
   };
 
@@ -127,19 +136,7 @@ export default function AdminPanel() {
         </button>
       </div>
 
-      {errorMessage && (
-        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-6 flex justify-between items-center">
-          <p className="font-medium">{errorMessage}</p>
-          <button onClick={() => setErrorMessage('')} className="text-red-500 font-bold hover:text-red-800">&times;</button>
-        </div>
-      )}
-
-      {successMessage && (
-        <div className="bg-emerald-50 border border-emerald-200 text-emerald-700 px-4 py-3 rounded-lg mb-6 flex justify-between items-center">
-          <p className="font-medium">{successMessage}</p>
-          <button onClick={() => setSuccessMessage('')} className="text-emerald-500 font-bold hover:text-emerald-800">&times;</button>
-        </div>
-      )}
+      </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 mb-8">
         <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
@@ -191,9 +188,9 @@ export default function AdminPanel() {
             </div>
             <button 
               disabled={loading}
-              className="bg-indigo-600 text-white px-6 py-2 rounded-md font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors h-[42px]"
+              className="bg-indigo-600 flex items-center justify-center min-w-[160px] text-white px-6 py-2 rounded-md font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors h-[42px]"
             >
-              {loading ? 'Creando...' : 'Crear Instancia'}
+              {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Crear Instancia'}
             </button>
           </div>
         </form>
@@ -247,31 +244,45 @@ export default function AdminPanel() {
                   <td className="px-6 py-4 text-right flex items-center justify-end gap-3">
                     <button 
                       onClick={() => regenerateToken(c.id)}
-                      disabled={c.status === 'inactive'}
+                      disabled={c.status === 'inactive' || (actionLoading?.id === c.id)}
                       className="p-2 text-amber-600 hover:bg-amber-50 rounded-lg transition-colors disabled:opacity-50"
                       title="Regenerar Link Mágico"
                     >
-                      <RefreshCw className="w-4 h-4" />
+                      {actionLoading?.id === c.id && actionLoading?.action === 'regenerate' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
                     </button>
                     <button 
                       onClick={() => toggleStatus(c.id, c.status)}
-                      className={`p-2 rounded-lg transition-colors ${c.status === 'active' ? 'text-slate-500 hover:text-amber-600 hover:bg-amber-50' : 'text-emerald-600 hover:bg-emerald-50'}`}
+                      disabled={actionLoading?.id === c.id}
+                      className={`p-2 rounded-lg transition-colors disabled:opacity-50 ${c.status === 'active' ? 'text-slate-500 hover:text-amber-600 hover:bg-amber-50' : 'text-emerald-600 hover:bg-emerald-50'}`}
                       title={c.status === 'active' ? 'Deshabilitar Cliente' : 'Habilitar Cliente'}
                     >
-                      {c.status === 'active' ? <PowerOff className="w-4 h-4" /> : <Power className="w-4 h-4" />}
+                      {actionLoading?.id === c.id && actionLoading?.action === 'toggle' ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        c.status === 'active' ? <PowerOff className="w-4 h-4" /> : <Power className="w-4 h-4" />
+                      )}
                     </button>
                     <button 
                       onClick={() => deleteClient(c.id)}
-                      className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                      disabled={actionLoading?.id === c.id}
+                      className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50"
                       title="Eliminar Cliente Permanentemente"
                     >
-                      <Trash2 className="w-4 h-4" />
+                      {actionLoading?.id === c.id && actionLoading?.action === 'delete' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
                     </button>
                   </td>
                 </tr>
               )
             })}
-            {clients.length === 0 && (
+            {fetchingClients && (
+              <tr>
+                <td colSpan="4" className="px-6 py-12 text-center text-slate-500">
+                  <Loader2 className="w-8 h-8 animate-spin mx-auto text-indigo-600 mb-2" />
+                  Cargando clientes...
+                </td>
+              </tr>
+            )}
+            {!fetchingClients && clients.length === 0 && (
               <tr>
                 <td colSpan="4" className="px-6 py-8 text-center text-slate-500">
                   No hay clientes registrados.
