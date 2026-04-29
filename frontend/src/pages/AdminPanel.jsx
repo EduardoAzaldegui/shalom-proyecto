@@ -136,8 +136,6 @@ export default function AdminPanel() {
         </button>
       </div>
 
-      </div>
-
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 mb-8">
         <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
           <UserPlus className="w-5 h-5 text-slate-500" /> Nuevo Cliente
