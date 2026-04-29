@@ -176,7 +176,7 @@ export default function AdminPanel() {
                   {personModal.data.cached?.person_name && (
                     <div className="bg-amber-50 rounded-xl p-3 border border-amber-200">
                       <div className="text-xs text-amber-600 font-bold mb-1">Dato al momento de registro</div>
-                      <div className="text-sm text-amber-800">{personModal.data.cached.person_name} — DNI: {personModal.data.cached.person_document}</div>
+                      <div className="text-sm text-amber-800">{personModal.data.cached.person_name} — DNI/RUC: {personModal.data.cached.person_document}</div>
                     </div>
                   )}
                 </>
@@ -295,7 +295,7 @@ export default function AdminPanel() {
                     {c.person_name ? (
                       <div>
                         <div className="font-semibold text-slate-800 text-sm">{c.person_name}</div>
-                        <div className="text-xs font-mono text-indigo-600 mt-0.5">DNI: {c.person_document || '—'}</div>
+                        <div className="text-xs font-mono text-indigo-600 mt-0.5">DNI/RUC: {c.person_document || '—'}</div>
                       </div>
                     ) : (
                       <span className="text-slate-400 italic text-sm">No registrado</span>
