@@ -307,11 +307,45 @@ export default function ClientDocs() {
     </div>
   );
 
-  const currentEndpoint = swagger.paths[activePath];
-  // /terminals and /auth/refresh-session are our own backend endpoints, not in swagger
+  let currentEndpoint = swagger.paths[activePath];
+  let currentMethod = currentEndpoint ? Object.keys(currentEndpoint)[0] : 'post';
+  let endpointDetails = currentEndpoint ? currentEndpoint[currentMethod] : {};
+
+  // Inyectar schema manual para endpoints de la API que no están en el Swagger de Shalom
+  if (activePath === '/terminals') {
+    currentMethod = 'get';
+    endpointDetails = {
+      summary: 'Catálogo de Agencias (Terminales)',
+      description: 'Obtiene la lista completa de todas las agencias/terminales de Shalom a nivel nacional. Útil para rellenar campos origin y destination.',
+      parameters: [
+        {
+          name: "search",
+          in: "query",
+          description: "Término de búsqueda opcional para filtrar terminales",
+          schema: { type: "string" }
+        }
+      ],
+      responses: {
+        '200': {
+          content: {
+            'application/json': {
+              schema: {
+                example: {
+                  count: 547,
+                  terminals: [
+                    { ter_id: 3, name: "CHACHAPOYAS CO DOS DE MAYO", ubigeo: "AMAZONAS - CHACHAPOYAS", abbr: "CHH" }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    };
+  }
+
+  // /auth/refresh-session are our own backend endpoints, not in swagger
   if (!currentEndpoint && activePath !== '/terminals' && !activePath.startsWith('/auth/')) return null;
-  const currentMethod = currentEndpoint ? Object.keys(currentEndpoint)[0] : 'post';
-  const endpointDetails = currentEndpoint ? currentEndpoint[currentMethod] : {};
 
   const getFlatProperties = (schemaProperties, requiredList = [], parentKey = '') => {
     let flat = {};
@@ -327,10 +361,21 @@ export default function ClientDocs() {
     return flat;
   };
 
-  const properties = getFlatProperties(
+  let properties = getFlatProperties(
     endpointDetails?.requestBody?.content?.['application/json']?.schema?.properties,
     endpointDetails?.requestBody?.content?.['application/json']?.schema?.required
   );
+
+  // Mapear parámetros de Query si existen (como en GET /terminals)
+  if (endpointDetails?.parameters && endpointDetails.parameters.length > 0) {
+    endpointDetails.parameters.forEach(p => {
+      properties[p.name] = {
+        description: p.description,
+        type: p.schema?.type || 'string',
+        isRequired: p.required || false
+      };
+    });
+  }
   
   const expectedResponse = REAL_RESPONSES[activePath] || endpointDetails?.responses?.['200']?.content?.['application/json']?.schema?.example || { success: true };
 
@@ -338,7 +383,7 @@ export default function ClientDocs() {
     const isMasterPath = MASTER_KEY_PATHS.has(activePath);
 
     if (activePath === '/terminals') {
-      return `curl -X GET ${API_BASE}/terminals \\\n  -H "Accept: application/json"`;
+      return `curl -X GET ${API_BASE}/terminals${terminalsSearch ? '?search=' + terminalsSearch : ''} \\\n  -H "Accept: application/json"`;
     }
 
     let bodyExample = {};
@@ -719,8 +764,24 @@ export default function ClientDocs() {
                       </button>
                     </div>
                     {currentMethod === 'get' ? (
-                      <div className="flex-1 flex items-center justify-center text-slate-500 bg-[#181825] p-5 text-center text-sm">
-                        Los endpoints GET no envían cuerpo en la petición.<br/>Presiona el botón "Lanzar" para ejecutar la consulta.
+                      <div className="flex-1 flex flex-col items-center justify-center text-slate-500 bg-[#181825] p-5 text-center text-sm gap-4">
+                        <p>Los endpoints GET no envían cuerpo en la petición.</p>
+                        {activePath === '/terminals' && (
+                          <div className="flex flex-col items-start gap-1 w-full max-w-sm">
+                            <label className="text-[10px] uppercase font-bold text-slate-400">Parámetros Query</label>
+                            <div className="flex items-center gap-2 w-full bg-[#1e1e2e] border border-slate-700/50 rounded-lg p-2 hover:border-indigo-500/50 transition-colors">
+                              <span className="text-xs font-mono text-indigo-400 bg-indigo-500/10 px-2 py-1 rounded">?search=</span>
+                              <input 
+                                type="text" 
+                                value={terminalsSearch} 
+                                onChange={(e) => setTerminalsSearch(e.target.value)} 
+                                placeholder="Buscar terminal por nombre..." 
+                                className="flex-1 bg-transparent border-none outline-none text-slate-300 text-sm font-mono placeholder:text-slate-600"
+                              />
+                            </div>
+                          </div>
+                        )}
+                        <p className="mt-2 text-xs">Presiona el botón "Lanzar Petición en Vivo" para ejecutar la consulta.</p>
                       </div>
                     ) : (
                       <div className="flex-1 w-full bg-[#1e1e2e]">
