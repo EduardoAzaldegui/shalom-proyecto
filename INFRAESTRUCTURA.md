@@ -1,12 +1,11 @@
-# Arquitectura e Infraestructura de Shalom Proxy
+# Arquitectura e Infraestructura — Shalom Proxy
 
 ## Resumen de la Arquitectura (Zero-Touch & Serverless)
 
-La plataforma "Shalom Proxy" ha sido rediseñada para funcionar de manera 100% *Serverless*, garantizando alta disponibilidad sin costos base de mantenimiento (pago por uso). La arquitectura se divide en dos capas principales:
+La plataforma "Shalom Proxy" funciona 100% *Serverless* sobre AWS. Se divide en dos capas con plataformas y workflows de deploy completamente independientes.
 
 ```mermaid
 flowchart TD
-    %% Estilos
     classDef aws fill:#FF9900,stroke:#232F3E,stroke-width:2px,color:#232F3E;
     classDef github fill:#24292e,stroke:#fff,stroke-width:2px,color:#fff;
     classDef shalom fill:#0052cc,stroke:#fff,stroke-width:2px,color:#fff;
@@ -29,61 +28,167 @@ flowchart TD
         Shalom[API Shalom Oficial<br/>Master API Key]:::shalom
     end
 
-    %% Relaciones
     Repo -- "Push a rama main\ntriggerea CI/CD" --> Amplify
     User -- "HTTPS Request\nApp Web" --> Amplify
     User -- "HTTPS REST API" --> APIGW
     Amplify -- "Consultas API\n(Axios / Fetch)" --> APIGW
     APIGW -- "Invoca función" --> Lambda
     Lambda -- "CRUD\nBoto3" --> DynamoDB
-    Lambda -- "Peticiones Enrutadas\n(Inyecta Master Key)" --> Shalom
+    Lambda -- "Peticiones Enrutadas\n(Inyecta Master Key + Ownership Filter)" --> Shalom
 ```
 
+---
 
-### 1. Frontend (Capa de Presentación)
-- **Servicio:** AWS Amplify Hosting
+## 1. Frontend — AWS Amplify
+
+- **Framework:** React 19 + Vite 8 + TailwindCSS 3 + React Router 7
 - **Repositorio:** GitHub (`EduardoAzaldegui/shalom-proyecto`)
-- **Despliegue:** Monorepo CI/CD configurado para la subcarpeta `/frontend`. Cada vez que se hace push a `main`, Amplify compila usando `npm install --prefix frontend` y `npm run build --prefix frontend`.
-- **Variables de Entorno:** Utiliza `VITE_API_BASE` para inyectar dinámicamente la URL del API Gateway sin quemar código.
+- **Deploy:** CI/CD automático — push a `main` → Amplify compila en 2-3 min
+  - Build: `npm install --prefix frontend && npm run build --prefix frontend`
+- **Configuración crítica:** `VITE_API_BASE` configurada en consola AWS Amplify (NO en código ni .env)
+- **Páginas:**
+  - `/admin` → `AdminLogin.jsx` + `AdminPanel.jsx` — gestión de clientes B2B
+  - `/docs?token=<magic_token>` → `ClientDocs.jsx` — portal interactivo con playground
 
-### 2. Backend (Capa Lógica y Proxy)
-- **Servicio Principal:** AWS Lambda (Python 3.9)
-- **Gateway:** Amazon API Gateway (Proxy Endpoint)
-- **Base de Datos:** Amazon DynamoDB (Tablas: `shalom-proxy-api-clients-dev`, `shalom-proxy-api-admin-dev`)
-- **Adaptador:** `Mangum` para empaquetar la aplicación FastAPI dentro del entorno Lambda.
-- **Orquestación IaaC:** Serverless Framework v3
+### Testing Frontend
+```
+# NO usar para testear producción (VITE_API_BASE no apuntará al Lambda real)
+cd frontend && npm run dev
+
+# Flujo correcto:
+git push origin main            # Amplify auto-deploya
+# Abrir [AMPLIFY_URL]/docs?token=<magic_token>    # Testear ClientDocs
+# Abrir [AMPLIFY_URL]/admin                        # Testear AdminPanel
+```
+
+### Obtener magic_token de un cliente
+```python
+# desde la raíz del repo
+import boto3
+dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+table = dynamodb.Table('shalom-proxy-api-clients-dev')
+active = [i for i in table.scan()['Items'] if i.get('status') == 'active']
+print(active[0]['magic_token'])  # usar en /docs?token=...
+```
 
 ---
 
-## Estimación de Costos (Capa Gratuita / Volumen Bajo-Medio)
+## 2. Backend — AWS Lambda + API Gateway
 
-El ecosistema entero está bajo el esquema **Pay-as-you-go**. Si no hay tráfico, el costo es literalmente **$0.00 al mes**.
+- **Framework:** FastAPI + Mangum (adaptador Lambda)
+- **Runtime:** Python 3.9 | **IaaC:** Serverless Framework v3
+- **URL producción:** `https://9lrgs4st13.execute-api.us-east-1.amazonaws.com/dev`
+- **Base de datos:** DynamoDB
+  - `shalom-proxy-api-clients-dev` — instancias de clientes B2B (incluye `person_name`, `person_document`)
+  - `shalom-proxy-api-admin-dev` — credenciales de administrador
 
-| Servicio | Capa Gratuita Mensual (AWS Free Tier) | Costo tras exceder Capa Gratuita |
-| :--- | :--- | :--- |
-| **AWS Lambda** | 1 Millón de peticiones / 400,000 GB-segundos | ~$0.20 por 1 millón de requests adicionales |
-| **Amazon API Gateway** | 1 Millón de llamadas REST API | ~$3.50 por millón de llamadas adicionales |
-| **Amazon DynamoDB** | 25 GB almacenamiento, 25 WCU/RCU (suficiente para millones de lecturas) | ~$1.25 por millón de escrituras adicionales |
-| **AWS Amplify (Hosting)** | 1000 minutos de Build, 15 GB ancho de banda servido | $0.01 por min de Build, $0.15 por GB servido adicional |
+### Deploy Backend
 
-### Conclusión de Costos
-Para un proxy B2B de volumen bajo-medio (menos de 1,000,000 llamadas al mes y picos predecibles), la infraestructura operará al **100% dentro de la Capa Gratuita Permanente (Free Tier)** de AWS. Aún asumiendo un volumen de 5 millones de transacciones mensuales (bastante alto), la factura difícilmente excedería los **$20 - $30 USD** mensuales combinados, sin necesidad de gastar horas manteniendo VPS o contenedores.
+> ⚠️ **Windows/PowerShell:** `npx` no funciona (execution policy). Usar node directamente.
+
+```powershell
+# Desde la raíz del repo:
+
+# 1. Syntax check obligatorio antes de deployar
+venv\Scripts\python.exe -m py_compile backend\main.py
+
+# 2. Deploy a AWS Lambda
+node "C:\Program Files\nodejs\node_modules\serverless\bin\serverless.js" deploy --stage dev
+```
+
+### Testing Backend
+```python
+# Siempre usar el venv del repo, nunca python global
+venv\Scripts\python.exe script_de_test.py
+
+# Ejemplo: test de endpoint real
+import requests
+API = 'https://9lrgs4st13.execute-api.us-east-1.amazonaws.com/dev'
+r = requests.post(f'{API}/proxy',
+    json={'method': 'post', 'path': '/track', 'body': {'orderNumber': '79401580', 'orderCode': 'WHPM'}},
+    headers={'x-api-key': '<api_key_del_cliente>'})
+print(r.status_code, r.json())
+```
 
 ---
 
-## Mantenimiento y Extensión
+## 3. Ownership Filter (Seguridad de Tenancy)
 
-### Frontend (Amplify)
-- Cualquier cambio realizado y *pusheado* a la rama `main` en GitHub activará la *pipeline* automática de AWS Amplify. En 2-3 minutos los cambios estarán reflejados en producción.
-- Para modificar la ruta del backend, agrega o modifica la variable de entorno `VITE_API_BASE` desde la Consola de AWS Amplify.
+El proxy valida que cada cliente solo acceda a **sus propias guías** comparando el DNI del remitente de la guía contra el DNI del usuario autenticado en Shalom.
 
-### Backend (Serverless)
-- Para modificar la lógica del Proxy, edita `backend/main.py` de forma local.
-- Para desplegar los cambios al entorno AWS, debes tener las llaves programáticas (AWS Access Key ID) exportadas en tu terminal y ejecutar el siguiente comando desde la carpeta `/backend`:
-  ```bash
-  npx serverless deploy
-  ```
+### Endpoints protegidos
+`/track`, `/track-massive`, `/ticket-image`, `/ticket-pdf`, `/label`
 
-### Base de Datos (DynamoDB)
-- La base de datos es ahora administrada y **stateless**. Se han reemplazado las tablas SQL por tablas NoSQL en DynamoDB usando `boto3`. No requiere respaldos de servidor ni configuración de motores de BD.
-- Se configuraron GSI (Global Secondary Indexes) para búsquedas rápidas por `magic_token` y `api_key`.
+### Respuestas
+| Escenario | HTTP |
+|-----------|------|
+| Guía propia, existe | `200 OK` |
+| Guía existe, pertenece a otra cuenta | `403 Forbidden` — "Acceso denegado" |
+| Guía no encontrada en Shalom | `404 Not Found` — mensaje exacto de Shalom |
+| `/track-massive` con guías ajenas/inexistentes | `200 OK` con lista vacía `[]` |
+
+### Caché
+`get_shalom_user_document()` cachea el DNI del usuario en memoria por 5 minutos por `instance_id` — evita llamar a `/get-user` en cada request de tracking.
+
+---
+
+## 4. Admin Endpoints
+
+| Método | Path | Descripción |
+|--------|------|-------------|
+| `POST` | `/admin/login` | Login admin |
+| `GET` | `/admin/clients` | Listar clientes |
+| `POST` | `/admin/clients` | Crear cliente (guarda `person_name`, `person_document` via `/get-user`) |
+| `PUT` | `/admin/clients/:id/status` | Activar/desactivar cliente |
+| `DELETE` | `/admin/clients/:id` | Eliminar cliente |
+| `POST` | `/admin/clients/:id/regenerate-token` | Nuevo magic link |
+| `GET` | `/admin/clients/:id/user` | Ver datos live del remitente en Shalom (cached + live) |
+
+---
+
+## 5. Guía de Prueba Real (LOGIPACK)
+
+| Campo | Valor |
+|-------|-------|
+| N° Orden | `79401580` |
+| Código | `WHPM` |
+| Remitente | JERRY RODRIGO CCOLLANA SALAZAR |
+| DNI Remitente | `47676522` |
+| Destino | PIURA / AV. GRAU - AEREO |
+| Estado | En tránsito |
+
+---
+
+## 6. Estimación de Costos
+
+El stack opera **100% en Free Tier** para volumen bajo-medio:
+
+| Servicio | Free Tier Mensual | Costo extra |
+|----------|------------------|-------------|
+| AWS Lambda | 1M requests / 400K GB-s | ~$0.20/M requests |
+| API Gateway | 1M calls | ~$3.50/M calls |
+| DynamoDB | 25 GB / 25 WCU-RCU | ~$1.25/M writes |
+| Amplify Hosting | 1000 min build / 15 GB BW | $0.01/min build |
+
+Para <1M requests/mes: **$0.00** (Free Tier permanente).
+
+---
+
+## 7. Flujo de Trabajo Completo
+
+```
+┌─ Cambio en BACKEND ──────────────────────────────────────────┐
+│  1. Editar backend/main.py o backend/database.py             │
+│  2. venv\Scripts\python.exe -m py_compile backend\main.py    │
+│  3. node [serverless.js] deploy --stage dev  (esperar ~65s)  │
+│  4. Testear con script Python contra URL de API Gateway       │
+└──────────────────────────────────────────────────────────────┘
+
+┌─ Cambio en FRONTEND ─────────────────────────────────────────┐
+│  1. Editar frontend/src/pages/*.jsx                           │
+│  2. git add . && git commit -m "feat: ..."                   │
+│  3. git push origin main                                     │
+│  4. Amplify auto-build (2-3 min)                             │
+│  5. Verificar en browser [AMPLIFY_URL]/docs?token=...        │
+└──────────────────────────────────────────────────────────────┘
+```

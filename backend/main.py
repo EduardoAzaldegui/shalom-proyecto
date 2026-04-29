@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import Optional, Any
 import requests
 import os
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 import database
@@ -24,8 +25,6 @@ if not SHALOM_API_KEY_MASTER:
     warnings.warn("⚠️  SHALOM_API_KEY_MASTER no está definido en .env.local. Los endpoints restringidos pueden fallar.")
 
 # Paths que requieren la Master Key del lado del servidor.
-# El frontend los llama igual que cualquier otro endpoint (via /proxy).
-# El proxy detecta la ruta y cambia el header x-api-key automáticamente.
 MASTER_KEY_PATHS = {
     "/quote",
     "/track",
@@ -38,6 +37,105 @@ MASTER_KEY_PATHS = {
     "/status",
     "/instances",
 }
+
+# Paths que requieren validación de ownership (la guía debe pertenecer al remitente del cliente).
+OWNERSHIP_CHECK_PATHS = {"/track", "/track-massive", "/ticket-image", "/ticket-pdf", "/label"}
+
+# ─────────────────────────────────────────────
+#  Cache de /get-user por instance_id (TTL 5 min)
+#  Evita llamar a Shalom en cada request de tracking.
+# ─────────────────────────────────────────────
+_user_cache: dict[str, dict] = {}
+_USER_CACHE_TTL = 300  # segundos
+
+def get_shalom_user_document(instance_id: str, api_key_to_use: str) -> Optional[str]:
+    """
+    Llama a /get-user en Shalom y devuelve el DNI (document) del remitente.
+    Usa cache en memoria por instance_id con TTL de 5 minutos.
+    Devuelve None si no se puede obtener el documento.
+    """
+    now = time.time()
+    cached = _user_cache.get(instance_id)
+    if cached and now < cached["expires_at"]:
+        return cached["document"]
+
+    headers = {"x-api-key": api_key_to_use, "Content-Type": "application/json"}
+    try:
+        resp = requests.post(
+            f"{SHALOM_API_URL}/get-user",
+            headers=headers,
+            json={"instanceId": instance_id},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            person = data.get("person", {})
+            document = str(person.get("document", "")).strip()
+            if document:
+                _user_cache[instance_id] = {
+                    "document": document,
+                    "expires_at": now + _USER_CACHE_TTL
+                }
+                return document
+    except Exception as e:
+        print(f"[ownership] Error en /get-user para instance {instance_id}: {e}")
+    return None
+
+
+def get_shalom_user_full(instance_id: str, api_key_to_use: str) -> Optional[dict]:
+    """
+    Llama a /get-user en Shalom y devuelve el objeto person completo.
+    Usado al crear/activar clientes para persistir nombre del remitente.
+    """
+    headers = {"x-api-key": api_key_to_use, "Content-Type": "application/json"}
+    try:
+        resp = requests.post(
+            f"{SHALOM_API_URL}/get-user",
+            headers=headers,
+            json={"instanceId": instance_id},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            person = data.get("person", {})
+            return {
+                "person_id": data.get("person_id"),
+                "full_name": person.get("full_name"),
+                "document": str(person.get("document", "")).strip(),
+                "phone": person.get("phone"),
+            }
+    except Exception as e:
+        print(f"[get-user] Error: {e}")
+    return None
+
+
+def extract_sender_document_from_track(response_data: dict) -> Optional[str]:
+    """
+    Extrae el DNI del remitente de la respuesta de /track.
+    Estructura: response.search.data.remitente.documento
+    """
+    try:
+        return str(response_data["search"]["data"]["remitente"]["documento"]).strip()
+    except (KeyError, TypeError):
+        return None
+
+
+def extract_sender_documents_from_track_massive(response_data: dict) -> list[str]:
+    """
+    Extrae los DNIs del remitente de la respuesta de /track-massive.
+    Estructura: response[].search.data.remitente.documento (array de resultados)
+    """
+    docs = []
+    try:
+        if isinstance(response_data, list):
+            for item in response_data:
+                doc = extract_sender_document_from_track(item)
+                if doc:
+                    docs.append(doc)
+    except Exception:
+        pass
+    return docs
+
 
 app = FastAPI(title="Shalom API Management Portal", version="2.0")
 
@@ -115,11 +213,24 @@ def create_client(client: ClientCreate, is_admin: bool = Depends(verify_admin_to
             requests.delete(f"{SHALOM_API_URL}/instances", headers=headers, json={"instanceId": instance_id})
             raise HTTPException(status_code=400, detail="Credenciales de Shalom inválidas.")
 
-        client_id, magic_token = database.create_client(client.name, client.email, instance_id, api_key, client.shalom_username, client.shalom_password)
+        # Obtener datos del remitente (person) desde Shalom y almacenarlos
+        person_info = get_shalom_user_full(instance_id, SHALOM_API_KEY_MASTER)
+        person_name = person_info.get("full_name") if person_info else None
+        person_document = person_info.get("document") if person_info else None
+
+        client_id, magic_token = database.create_client(
+            client.name, client.email,
+            instance_id, api_key,
+            client.shalom_username, client.shalom_password,
+            person_name=person_name,
+            person_document=person_document
+        )
         return {
             "message": "Client created successfully",
             "client_id": client_id,
-            "magic_token": magic_token
+            "magic_token": magic_token,
+            "person_name": person_name,
+            "person_document": person_document,
         }
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=500, detail=f"Shalom API error: {str(e)}")
@@ -135,6 +246,7 @@ def regenerate_token(client_id: str, is_admin: bool = Depends(verify_admin_token
         "message": "Token regenerated",
         "magic_token": new_token
     }
+
 class StatusUpdate(BaseModel):
     status: str
 
@@ -159,7 +271,7 @@ def update_status(client_id: str, payload: StatusUpdate, is_admin: bool = Depend
             resp = requests.post(f"{SHALOM_API_URL}/instances", 
                                headers={"x-api-key": SHALOM_API_KEY_MASTER, "Content-Type": "application/json"},
                                json={"name": client["name"], "email": client["email"]}, timeout=15)
-            if resp.status_code == 200 or resp.status_code == 201:
+            if resp.status_code in (200, 201):
                 data = resp.json()
                 new_instance = data.get("instanceId")
                 new_api = data.get("apiKey")
@@ -172,6 +284,15 @@ def update_status(client_id: str, payload: StatusUpdate, is_admin: bool = Depend
                     }
                     requests.post(f"{SHALOM_API_URL}/login", headers={"x-api-key": SHALOM_API_KEY_MASTER, "Content-Type": "application/json"}, json=login_payload, timeout=15)
                     database.update_client_credentials(client_id, new_instance, new_api)
+
+                    # Refrescar datos del remitente (person) en la nueva instancia
+                    person_info = get_shalom_user_full(new_instance, SHALOM_API_KEY_MASTER)
+                    if person_info:
+                        database.update_client_person(
+                            client_id,
+                            person_name=person_info.get("full_name"),
+                            person_document=person_info.get("document")
+                        )
         except Exception as e:
             print(f"Error creating instance: {e}")
         database.update_client_status(client_id, "active")
@@ -198,6 +319,38 @@ def delete_client(client_id: str, is_admin: bool = Depends(verify_admin_token)):
 
 
 # ─────────────────────────────────────────────
+#  Admin: Ver datos del remitente (persona Shalom) de un cliente
+# ─────────────────────────────────────────────
+@app.get("/admin/clients/{client_id}/user")
+def get_client_shalom_user(client_id: str, is_admin: bool = Depends(verify_admin_token)):
+    """
+    Devuelve los datos de la persona (remitente) asociada al cliente en Shalom.
+    Llama a /get-user en tiempo real y también devuelve los datos cacheados en DB.
+    """
+    client = database.get_client_by_id(client_id)
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    if client.get("status") != "active":
+        raise HTTPException(status_code=400, detail="El cliente debe estar activo para consultar su usuario en Shalom.")
+
+    # Datos cacheados en DB (guardados al crear/activar)
+    cached = {
+        "person_name": client.get("person_name"),
+        "person_document": client.get("person_document"),
+    }
+
+    # Datos frescos de Shalom en tiempo real
+    live_info = get_shalom_user_full(client.get("instance_id"), SHALOM_API_KEY_MASTER)
+
+    return {
+        "client_id": client_id,
+        "client_name": client["name"],
+        "cached": cached,
+        "live": live_info,
+    }
+
+
+# ─────────────────────────────────────────────
 #  Client Auth
 # ─────────────────────────────────────────────
 @app.post("/auth/magic")
@@ -208,7 +361,6 @@ def magic_login(payload: MagicLogin):
     expires_at = datetime.fromisoformat(client["token_expires_at"])
     if datetime.now() > expires_at:
         raise HTTPException(status_code=401, detail="Token has expired")
-    # Se devuelve apiKey al frontend (Opción B elegida por el usuario)
     return {
         "success": True,
         "client": {
@@ -245,11 +397,7 @@ def refresh_shalom_session(payload: MagicLogin):
 
 # ─────────────────────────────────────────────
 #  Terminals Catalog
-#  Construido desde datos reales de /pending-shipments.
-#  Shalom no expone un endpoint público de terminales.
 # ─────────────────────────────────────────────
-import time
-
 terminals_cache = {
     "data": [],
     "expires_at": 0
@@ -263,7 +411,6 @@ def get_terminals(search: Optional[str] = None):
     """
     global terminals_cache
     
-    # Check cache (1 hour = 3600 seconds)
     if time.time() > terminals_cache["expires_at"] or not terminals_cache["data"]:
         headers = {"x-api-key": SHALOM_API_KEY_MASTER, "Content-Type": "application/json"}
         try:
@@ -291,7 +438,7 @@ def get_terminals(search: Optional[str] = None):
 
 
 # ─────────────────────────────────────────────
-#  Smart Proxy  (SEGURO CON API KEY)
+#  Smart Proxy  (SEGURO CON API KEY + OWNERSHIP CHECK)
 # ─────────────────────────────────────────────
 class ProxyRequest(BaseModel):
     method: str         # "post" | "get"
@@ -333,6 +480,41 @@ def proxy_request(req: ProxyRequest, x_api_key: str = Header(None)):
     if req.path in INSTANCE_PATHS:
         body["instanceId"] = client.get("instance_id")
 
+    # 4.5 ── OWNERSHIP PRE-CHECK PARA BINARIOS ────────────────────────────
+    # Para /ticket-image, /ticket-pdf, /label, Shalom devuelve binario sin datos del remitente.
+    # Pre-validar ownership consultando /track antes de hacer el request a Shalom.
+    if req.path in ["/ticket-image", "/ticket-pdf", "/label"]:
+        instance_id = client.get("instance_id")
+        sender_doc = get_shalom_user_document(instance_id, SHALOM_API_KEY_MASTER)
+        if sender_doc:
+            order_number = body.get("orderNumber")
+            order_code = body.get("orderCode")
+            if order_number and order_code:
+                try:
+                    pre_resp = requests.post(
+                        f"{SHALOM_API_URL}/track",
+                        headers={"x-api-key": SHALOM_API_KEY_MASTER, "Content-Type": "application/json"},
+                        json={"orderNumber": order_number, "orderCode": order_code},
+                        timeout=10
+                    )
+                    if pre_resp.status_code == 200:
+                        pre_data = pre_resp.json()
+                        if pre_data.get("success") is False:
+                            msg = pre_data.get("message") or pre_data.get("search", {}).get("message") or "La guía solicitada no fue encontrada en Shalom."
+                            raise HTTPException(status_code=404, detail=msg)
+
+                        remitente_doc = extract_sender_document_from_track(pre_data)
+                        if remitente_doc and remitente_doc != sender_doc:
+                            raise HTTPException(
+                                status_code=403,
+                                detail="Acceso denegado: esta guía no pertenece a tu cuenta Shalom. "
+                                       "El remitente registrado no coincide con tu usuario."
+                            )
+                except HTTPException:
+                    raise
+                except Exception as pre_err:
+                    print(f"[ownership] WARNING: pre-check /track falló para {order_number}: {pre_err}")
+
     # 5. Llamar a Shalom
     url = f"{SHALOM_API_URL}{req.path}"
     try:
@@ -344,10 +526,65 @@ def proxy_request(req: ProxyRequest, x_api_key: str = Header(None)):
             raise HTTPException(status_code=400, detail="Método no soportado.")
 
         try:
-            return resp.json()
+            shalom_response = resp.json()
         except Exception:
             return {"raw_text": resp.text, "status_code": resp.status_code}
 
+        # 6. ── OWNERSHIP CHECK ──────────────────────────────────────────────
+        # Para endpoints de tracking e imágenes, validar que la guía
+        # pertenezca al remitente del cliente autenticado.
+        if req.path in OWNERSHIP_CHECK_PATHS:
+            instance_id = client.get("instance_id")
+            sender_doc = get_shalom_user_document(instance_id, SHALOM_API_KEY_MASTER)
+
+            # 6a. Si Shalom indica error → propagar como 404 con su propio mensaje.
+            # Shalom usa dos estructuras distintas según el endpoint:
+            #   - {"success": false, "message": "..."} → /track y similares
+            #   - {"error": "..."} → /ticket-image, /ticket-pdf, /label
+            shalom_error_msg: Optional[str] = None
+            if isinstance(shalom_response, dict):
+                if shalom_response.get("success") is False:
+                    shalom_error_msg = (
+                        shalom_response.get("message")
+                        or shalom_response.get("search", {}).get("message")
+                        or "La guía solicitada no fue encontrada en Shalom."
+                    )
+                elif "error" in shalom_response:
+                    shalom_error_msg = str(shalom_response["error"])
+
+            if shalom_error_msg:
+                raise HTTPException(status_code=404, detail=shalom_error_msg)
+
+            if sender_doc:
+                if req.path == "/track-massive":
+                    # Filtrar la lista: excluir guías que no existen (success:false)
+                    # y guías que no pertenecen al usuario (remitente diferente)
+                    if isinstance(shalom_response, list):
+                        filtered = []
+                        for item in shalom_response:
+                            if isinstance(item, dict) and item.get("success") is False:
+                                continue
+                            item_doc = extract_sender_document_from_track(item)
+                            if item_doc is None or item_doc == sender_doc:
+                                filtered.append(item)
+                        return filtered
+
+                elif req.path == "/track":
+                    # /track incluye el remitente directamente en su respuesta
+                    remitente_doc = extract_sender_document_from_track(shalom_response)
+                    if remitente_doc and remitente_doc != sender_doc:
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Acceso denegado: esta guía no pertenece a tu cuenta Shalom. "
+                                   "El remitente registrado no coincide con tu usuario."
+                        )
+            else:
+                print(f"[ownership] WARNING: No se pudo verificar ownership para instance {instance_id}. Permitiendo request.")
+
+        return shalom_response
+
+    except HTTPException:
+        raise
     except requests.exceptions.Timeout:
         raise HTTPException(status_code=504, detail="Shalom API timeout. Intentá de nuevo.")
     except Exception as e:

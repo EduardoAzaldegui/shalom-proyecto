@@ -22,21 +22,25 @@ const ENDPOINT_GROUPS = {
 const WARNINGS = {
   '/register': '⚠️ PRODUCCIÓN: Este endpoint registra envíos masivos REALES. Cada llamada exitosa genera guías y cargos en tu cuenta Shalom.',
   '/register-individual': '⚠️ PRODUCCIÓN: Este endpoint crea un envío REAL. La guía generada tiene costo. No modifiques el payload de ejemplo si solo quieres probar la conectividad.',
-  '/track': '💡 REGLA DE NEGOCIO: Aunque crees la guía por API, Shalom NO ACTIVA el Tracking ni el PDF hasta que el paquete FÍSICO es escaneado en mostrador. Mientras tanto, devolverá "No se encontró".'
+  '/track': '🔒 OWNERSHIP: El proxy valida automáticamente que la guía pertenezca a tu cuenta (por DNI del remitente). Intentar rastrear guías de otros usuarios retorna 403 Acceso Denegado. Además, Shalom NO ACTIVA el tracking hasta que el paquete es escaneado en mostrador.',
+  '/track-massive': '🔒 OWNERSHIP: El proxy filtra automáticamente los resultados. Sólo se devuelven las guías que pertenecen a tu cuenta. Las guías de otros usuarios son excluidas silenciosamente.',
+  '/ticket-image': '🔒 OWNERSHIP: Sólo puedes generar la imagen de tus propias guías. Intentar con una guía ajena retorna 403 Acceso Denegado.',
+  '/ticket-pdf': '🔒 OWNERSHIP: Sólo puedes generar el PDF de tus propias guías. Además, este endpoint solo funciona después de que el envío es recepcionado físicamente en Shalom.',
+  '/label': '🔒 OWNERSHIP: Sólo puedes generar la etiqueta de tus propias guías.',
 };
 
 const DYNAMIC_EXPLANATIONS = {
   '/auth/refresh-session': 'Renueva la sesión de Shalom automáticamente usando las credenciales seguras de tu instancia. Útil si recibes un error 401 (No Autorizado) de Shalom.',
   '/register-individual': '✅ VALIDADO: Crea una orden de envío individual. Usa campos en español: origen/destino con ter_id numérico. Retorna código de rastreo (4 letras) y número de guía.',
   '/register': 'Registra envíos en lote (múltiples shipments en un call). El campo origin del array espera el ter_id numérico de la terminal.',
-  '/track': 'Obtiene el estado de un envío en tránsito. OJO: Sólo funciona si el paquete ya fue depositado y pistoleado en agencia. Requiere orderNumber (número de guía) y orderCode (código corto).',
-  '/track-massive': 'Rastreo en lote de hasta 50 envíos. El payload usa el campo "orders" con un array de objetos {orderNumber, orderCode}.',
+  '/track': '🔒 OWNERSHIP ENFORCED: El proxy verifica que el DNI del remitente de la guía coincida con el DNI del usuario autenticado en tu cuenta Shalom. Si la guía no te pertenece, recibes 403. Requiere orderNumber (número de guía de 8 dígitos) y orderCode (código de 4 letras).',
+  '/track-massive': '🔒 OWNERSHIP ENFORCED: Rastreo en lote de hasta 50 envíos. El proxy filtra automáticamente los resultados: solo retorna las guías cuyo remitente coincide con tu usuario. Las guías ajenas son excluidas sin error.',
   '/pending-shipments': '✅ VALIDADO: Retorna todos los envíos pendientes de tu instancia. Incluye ter_id de origen/destino útiles para otros endpoints.',
-  '/get-user': '✅ VALIDADO: Retorna el perfil completo del usuario autenticado, incluyendo datos de persona, ubigeo y configuración.',
+  '/get-user': '✅ VALIDADO: Retorna el perfil completo del usuario autenticado, incluyendo datos de persona (full_name, document/DNI), ubigeo y configuración. El DNI del campo person.document es el identificador de ownership usado por el proxy para validar guías.',
   '/quote': 'Calcula el costo estimado de un envío según origen, destino, peso y dimensiones. Procesado transparentemente por el servidor.',
-  '/ticket-image': 'Genera imagen PNG del ticket de un envío. Procesado transparentemente por el servidor.',
-  '/ticket-pdf': 'Genera PDF del ticket. OJO: Sólo funciona después de que el envío es recepcionado físicamente en Shalom.',
-  '/label': 'Genera la etiqueta de despacho de un envío. Procesado transparentemente por el servidor.',
+  '/ticket-image': '🔒 OWNERSHIP ENFORCED: Genera imagen PNG del ticket de un envío. Solo funciona con tus propias guías — el proxy valida ownership antes de procesar.',
+  '/ticket-pdf': '🔒 OWNERSHIP ENFORCED: Genera PDF del ticket. Solo funciona con tus propias guías, y solo después de que el envío es recepcionado físicamente en Shalom.',
+  '/label': '🔒 OWNERSHIP ENFORCED: Genera la etiqueta de despacho de un envío. Solo funciona con tus propias guías.',
   '/terminals': '📍 Catálogo de terminales Shalom con sus ter_id numéricos. Úsalos en los campos origen y destino de /register-individual y /register. Puedes buscar por nombre o ubicación.'
 };
 
@@ -70,8 +74,34 @@ const REAL_RESPONSES = {
       "id": 979398,
       "origin_station": { "ter_id": 71, "name": "SANTA ANITA", "ubigeo": "LIMA - LIMA - SANTA ANITA", "abbreviation": "STA" },
       "destination_station": { "ter_id": 293, "name": "CAMANA", "ubigeo": "AREQUIPA - CAMANA - CAMANA", "abbreviation": "CAM" },
-      "service_order_guia_empresarial": "26484411",
-      "code_service_order_empresarial": "CM9D"
+      "service_order_guia_empresarial": "79401580",
+      "code_service_order_empresarial": "WHPM"
+    }
+  },
+  '/track': {
+    "search": {
+      "success": true,
+      "data": {
+        "guia": "79401580",
+        "codigo": "WHPM",
+        "remitente": { "nombre": "JERRY RODRIGO CCOLLANA SALAZAR", "documento": "47676522" },
+        "destinatario": { "nombre": "VEGA MORE JESSICA JULIANA", "documento": "41868458" },
+        "origen": "LIMA / ATE-VITARTE / URB SANTA ELVIRA",
+        "destino": "PIURA / PIURA / AV. GRAU - AEREO"
+      }
+    },
+    "statuses": { "success": true, "message": "En tránsito" }
+  },
+  '/get-user': {
+    "id": 80139,
+    "person_id": 721878,
+    "name": "HAMIR ZAVALA SANDOVAL",
+    "email": "logipackperu@gmail.com",
+    "person": {
+      "full_name": "JERRY RODRIGO CCOLLANA SALAZAR",
+      "document": "47676522",
+      "phone": 955890830,
+      "ubigeo": { "district": "SANTA ANITA", "province": "LIMA", "department": "LIMA" }
     }
   }
 };
@@ -103,9 +133,9 @@ const generateFallbackExample = (schema) => {
     for (const [key, val] of Object.entries(schema.properties)) {
       if (key === 'username' || key === 'email') example[key] = 'usuario@empresa.com';
       else if (key === 'password') example[key] = 'tu_contraseña_segura';
-      else if (key === 'orderNumber') example[key] = '26484411';
-      else if (key === 'orderCode') example[key] = 'CM9D';
-      else if (key === 'orders') example[key] = [{ orderNumber: '26484411', orderCode: 'CM9D' }];
+      else if (key === 'orderNumber') example[key] = '79401580';
+      else if (key === 'orderCode') example[key] = 'WHPM';
+      else if (key === 'orders') example[key] = [{ orderNumber: '79401580', orderCode: 'WHPM' }];
       else if (key === 'origen' || key === 'origin') example[key] = 71;
       else if (key === 'destino' || key === 'destination') example[key] = 293;
       else if (key === 'documento') example[key] = '71333169';

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Copy, RefreshCw, Key, UserPlus, LogOut, Trash2, Power, PowerOff, Loader2 } from 'lucide-react';
+import { Copy, RefreshCw, Key, UserPlus, LogOut, Trash2, Power, PowerOff, Loader2, User, X } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 
@@ -15,6 +15,7 @@ export default function AdminPanel() {
   const [loading, setLoading] = useState(false);
   const [fetchingClients, setFetchingClients] = useState(true);
   const [actionLoading, setActionLoading] = useState(null);
+  const [personModal, setPersonModal] = useState(null); // { clientName, data }
   const navigate = useNavigate();
 
   const getHeaders = () => {
@@ -110,7 +111,19 @@ export default function AdminPanel() {
 
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text);
-    alert('Copied to clipboard!');
+    toast.success('Copiado al portapapeles');
+  };
+
+  const viewClientPerson = async (clientId, clientName) => {
+    setActionLoading({ id: clientId, action: 'person' });
+    try {
+      const res = await axios.get(`${API_BASE}/admin/clients/${clientId}/user`, getHeaders());
+      setPersonModal({ clientName, data: res.data });
+    } catch (e) {
+      toast.error('No se pudo obtener los datos del remitente: ' + (e.response?.data?.detail || e.message));
+    } finally {
+      setActionLoading(null);
+    }
   };
 
   const handleLogout = () => {
@@ -120,6 +133,70 @@ export default function AdminPanel() {
 
   return (
     <div className="max-w-6xl mx-auto p-8">
+
+      {/* ── Modal de Persona Shalom ── */}
+      {personModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md border border-slate-200">
+            <div className="flex items-center justify-between p-5 border-b border-slate-200">
+              <div className="flex items-center gap-2">
+                <User className="w-5 h-5 text-indigo-600" />
+                <h3 className="font-bold text-slate-800">Remitente Shalom — {personModal.clientName}</h3>
+              </div>
+              <button onClick={() => setPersonModal(null)} className="text-slate-400 hover:text-slate-700">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-5 space-y-3">
+              {personModal.data.live ? (
+                <>
+                  <div className="bg-slate-50 rounded-xl p-4 border border-slate-200">
+                    <div className="text-xs text-slate-400 uppercase tracking-wider mb-2 font-bold">Datos en Vivo (Shalom)</div>
+                    <div className="space-y-2">
+                      <div>
+                        <span className="text-xs text-slate-500">Nombre completo</span>
+                        <div className="font-semibold text-slate-800">{personModal.data.live.full_name || '—'}</div>
+                      </div>
+                      <div className="flex gap-6">
+                        <div>
+                          <span className="text-xs text-slate-500">DNI / Documento</span>
+                          <div className="font-mono font-bold text-indigo-700">{personModal.data.live.document || '—'}</div>
+                        </div>
+                        <div>
+                          <span className="text-xs text-slate-500">Teléfono</span>
+                          <div className="font-mono text-slate-700">{personModal.data.live.phone || '—'}</div>
+                        </div>
+                        <div>
+                          <span className="text-xs text-slate-500">Person ID</span>
+                          <div className="font-mono text-slate-500 text-sm">{personModal.data.live.person_id || '—'}</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  {personModal.data.cached?.person_name && (
+                    <div className="bg-amber-50 rounded-xl p-3 border border-amber-200">
+                      <div className="text-xs text-amber-600 font-bold mb-1">Dato al momento de registro</div>
+                      <div className="text-sm text-amber-800">{personModal.data.cached.person_name} — DNI: {personModal.data.cached.person_document}</div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="text-center py-6 text-slate-500">
+                  No se pudo obtener información en vivo de Shalom.
+                  {personModal.data.cached?.person_name && (
+                    <div className="mt-2 font-medium text-slate-700">
+                      Dato guardado: {personModal.data.cached.person_name}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="px-5 pb-5">
+              <button onClick={() => setPersonModal(null)} className="w-full bg-indigo-600 text-white py-2.5 rounded-xl font-medium hover:bg-indigo-700 transition-colors">Cerrar</button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="flex items-center justify-between mb-8">
         <div className="flex items-center gap-3">
           <Key className="w-8 h-8 text-indigo-600" />
@@ -196,6 +273,7 @@ export default function AdminPanel() {
           <thead>
             <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 text-sm">
               <th className="px-6 py-3 font-medium">Cliente</th>
+              <th className="px-6 py-3 font-medium">Remitente Shalom</th>
               <th className="px-6 py-3 font-medium">Credenciales Shalom Pro</th>
               <th className="px-6 py-3 font-medium">Link Mágico de Docs</th>
               <th className="px-6 py-3 font-medium text-right">Acciones</th>
@@ -212,6 +290,16 @@ export default function AdminPanel() {
                       <div className="font-medium text-slate-800">{c.name}</div>
                     </div>
                     <div className="text-sm text-slate-500 ml-4">{c.email}</div>
+                  </td>
+                  <td className="px-6 py-4">
+                    {c.person_name ? (
+                      <div>
+                        <div className="font-semibold text-slate-800 text-sm">{c.person_name}</div>
+                        <div className="text-xs font-mono text-indigo-600 mt-0.5">DNI: {c.person_document || '—'}</div>
+                      </div>
+                    ) : (
+                      <span className="text-slate-400 italic text-sm">No registrado</span>
+                    )}
                   </td>
                   <td className="px-6 py-4">
                     <div className="font-semibold text-slate-700 text-sm">
@@ -237,6 +325,14 @@ export default function AdminPanel() {
                     </div>
                   </td>
                   <td className="px-6 py-4 text-right flex items-center justify-end gap-3">
+                    <button
+                      onClick={() => viewClientPerson(c.id, c.name)}
+                      disabled={c.status === 'inactive' || (actionLoading?.id === c.id)}
+                      className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-50"
+                      title="Ver datos del remitente en Shalom"
+                    >
+                      {actionLoading?.id === c.id && actionLoading?.action === 'person' ? <Loader2 className="w-4 h-4 animate-spin" /> : <User className="w-4 h-4" />}
+                    </button>
                     <button 
                       onClick={() => regenerateToken(c.id)}
                       disabled={c.status === 'inactive' || (actionLoading?.id === c.id)}
@@ -271,7 +367,7 @@ export default function AdminPanel() {
             })}
             {fetchingClients && (
               <tr>
-                <td colSpan="4" className="px-6 py-12 text-center text-slate-500">
+                <td colSpan="5" className="px-6 py-12 text-center text-slate-500">
                   <Loader2 className="w-8 h-8 animate-spin mx-auto text-indigo-600 mb-2" />
                   Cargando clientes...
                 </td>
@@ -279,7 +375,7 @@ export default function AdminPanel() {
             )}
             {!fetchingClients && clients.length === 0 && (
               <tr>
-                <td colSpan="4" className="px-6 py-8 text-center text-slate-500">
+                <td colSpan="5" className="px-6 py-8 text-center text-slate-500">
                   No hay clientes registrados.
                 </td>
               </tr>

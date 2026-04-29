@@ -49,7 +49,8 @@ def verify_admin(username, password):
         print(f"Error verifying admin: {e}")
     return False
 
-def create_client(name, email, instance_id, api_key, shalom_username, shalom_password):
+def create_client(name, email, instance_id, api_key, shalom_username, shalom_password,
+                   person_name=None, person_document=None):
     table = get_clients_table()
     client_id = str(uuid.uuid4())
     magic_token = str(uuid.uuid4())
@@ -69,6 +70,12 @@ def create_client(name, email, instance_id, api_key, shalom_username, shalom_pas
         'created_at': created_at,
         'status': 'active'
     }
+    # Datos del remitente Shalom (obtenidos vía /get-user al momento de crear)
+    if person_name:
+        item['person_name'] = person_name
+    if person_document:
+        item['person_document'] = person_document
+
     table.put_item(Item=item)
     return client_id, magic_token
 
@@ -148,6 +155,25 @@ def update_client_credentials(client_id, instance_id, api_key):
             ':i': instance_id,
             ':a': api_key
         }
+    )
+
+def update_client_person(client_id, person_name=None, person_document=None):
+    """Actualiza los datos del remitente (person) de un cliente en DynamoDB."""
+    table = get_clients_table()
+    updates = []
+    values = {}
+    if person_name is not None:
+        updates.append("person_name=:pn")
+        values[':pn'] = person_name
+    if person_document is not None:
+        updates.append("person_document=:pd")
+        values[':pd'] = person_document
+    if not updates:
+        return
+    table.update_item(
+        Key={'id': client_id},
+        UpdateExpression="set " + ", ".join(updates),
+        ExpressionAttributeValues=values
     )
 
 def delete_client(client_id):
