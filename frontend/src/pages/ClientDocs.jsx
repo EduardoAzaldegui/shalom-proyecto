@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import axios from 'axios';
-import { Terminal, Key, Copy, CheckCircle2, Server, BookOpen, Play, AlertTriangle, FileJson, Loader2 } from 'lucide-react';
+import { Terminal, Key, Copy, CheckCircle2, Server, BookOpen, Play, AlertTriangle, FileJson, Loader2, Download, FileText, Image as ImageIcon } from 'lucide-react';
 import Editor from '@monaco-editor/react';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'https://9lrgs4st13.execute-api.us-east-1.amazonaws.com/dev';
@@ -10,6 +10,35 @@ const SHALOM_API_URL = 'https://ecomapp.shalom-api.lat';
 // Endpoints enrutados via nuestro proxy (inyectan Master Key internamente).
 // El cliente llama a POST /proxy — el servidor inyecta lo que falta.
 const MASTER_KEY_PATHS = new Set(['/quote', '/track', '/track-massive', '/ticket-image', '/ticket-pdf', '/label']);
+
+// Endpoints que devuelven archivos binarios (PDF / imagen) codificados en base64.
+// Para estos, el playground muestra preview en pantalla + botón descargar.
+const BINARY_PATHS = new Set(['/ticket-image', '/ticket-pdf', '/label']);
+
+// Decodifica un base64 a Blob para preview/descarga. Robusto con strings grandes.
+function base64ToBlob(b64, contentType) {
+  const byteChars = atob(b64);
+  const byteArrays = [];
+  const SLICE = 1024;
+  for (let offset = 0; offset < byteChars.length; offset += SLICE) {
+    const slice = byteChars.slice(offset, offset + SLICE);
+    const arr = new Array(slice.length);
+    for (let i = 0; i < slice.length; i++) arr[i] = slice.charCodeAt(i);
+    byteArrays.push(new Uint8Array(arr));
+  }
+  return new Blob(byteArrays, { type: contentType });
+}
+
+// Recorta la cadena base64 en la respuesta a un preview legible (no rompe el JSON).
+function summarizeBinaryResponse(resp) {
+  if (!resp || typeof resp !== 'object' || resp.encoding !== 'base64') return resp;
+  const b64 = resp.base64 || '';
+  const head = b64.slice(0, 60);
+  return {
+    ...resp,
+    base64: `${head}…  [${b64.length} chars truncados — usar preview]`,
+  };
+}
 
 const ENDPOINT_GROUPS = {
   'Autenticación (Proxy)': ['/auth/refresh-session'],
@@ -24,9 +53,9 @@ const WARNINGS = {
   '/register-individual': '⚠️ PRODUCCIÓN: Este endpoint crea un envío REAL. La guía generada tiene costo. No modifiques el payload de ejemplo si solo quieres probar la conectividad.',
   '/track': '🔒 OWNERSHIP: El proxy valida automáticamente que la guía pertenezca a tu cuenta (por DNI del remitente). Intentar rastrear guías de otros usuarios retorna 403 Acceso Denegado. Además, Shalom NO ACTIVA el tracking hasta que el paquete es escaneado en mostrador.',
   '/track-massive': '🔒 OWNERSHIP: El proxy filtra automáticamente los resultados. Sólo se devuelven las guías que pertenecen a tu cuenta. Las guías de otros usuarios son excluidas silenciosamente.',
-  '/ticket-image': '🔒 OWNERSHIP: Sólo puedes generar la imagen de tus propias guías. Intentar con una guía ajena retorna 403 Acceso Denegado.',
-  '/ticket-pdf': '🔒 OWNERSHIP: Sólo puedes generar el PDF de tus propias guías. Además, este endpoint solo funciona después de que el envío es recepcionado físicamente en Shalom.',
-  '/label': '🔒 OWNERSHIP: Sólo puedes generar la etiqueta de tus propias guías.',
+  '/ticket-image': '🔒 OWNERSHIP: Sólo puedes generar la imagen de tus propias guías. Intentar con una guía ajena retorna 403 Acceso Denegado. 📎 La respuesta llega en base64 — usa el preview del playground o decodifica con `atob`/`base64.b64decode`.',
+  '/ticket-pdf': '🔒 OWNERSHIP: Sólo puedes generar el PDF de tus propias guías. Además, este endpoint solo funciona después de que el envío es recepcionado físicamente en Shalom. 📎 La respuesta llega en base64 — el playground te ofrece preview y descarga directa.',
+  '/label': '🔒 OWNERSHIP: Sólo puedes generar la etiqueta de tus propias guías. 📎 La respuesta llega en base64.',
 };
 
 const DYNAMIC_EXPLANATIONS = {
@@ -38,9 +67,9 @@ const DYNAMIC_EXPLANATIONS = {
   '/pending-shipments': '✅ VALIDADO: Retorna todos los envíos pendientes de tu instancia. Incluye ter_id de origen/destino útiles para otros endpoints.',
   '/get-user': '✅ VALIDADO: Retorna el perfil completo del usuario autenticado, incluyendo datos de persona (full_name, document/DNI), ubigeo y configuración. El DNI del campo person.document es el identificador de ownership usado por el proxy para validar guías.',
   '/quote': 'Calcula el costo estimado de un envío según origen, destino, peso y dimensiones. Procesado transparentemente por el servidor.',
-  '/ticket-image': '🔒 OWNERSHIP ENFORCED: Genera imagen PNG del ticket de un envío. Solo funciona con tus propias guías — el proxy valida ownership antes de procesar.',
-  '/ticket-pdf': '🔒 OWNERSHIP ENFORCED: Genera PDF del ticket. Solo funciona con tus propias guías, y solo después de que el envío es recepcionado físicamente en Shalom.',
-  '/label': '🔒 OWNERSHIP ENFORCED: Genera la etiqueta de despacho de un envío. Solo funciona con tus propias guías.',
+  '/ticket-image': '🔒 OWNERSHIP ENFORCED: Genera imagen PNG del ticket. La respuesta NO es binaria cruda: el proxy la devuelve en JSON con la imagen codificada en base64 (`{ encoding: "base64", base64: "..." }`). El playground muestra el preview y permite descargar.',
+  '/ticket-pdf': '🔒 OWNERSHIP ENFORCED: Genera PDF del ticket. La respuesta llega en JSON con el PDF en base64 (`{ encoding: "base64", base64: "..." }`). Solo funciona después de que el envío es recepcionado físicamente en Shalom. El playground muestra preview embebido y permite descarga directa.',
+  '/label': '🔒 OWNERSHIP ENFORCED: Genera la etiqueta de despacho en PDF. Respuesta en base64 dentro de JSON. Pesa ~500KB típicamente.',
   '/terminals': '📍 Catálogo de terminales Shalom con sus ter_id numéricos. Úsalos en los campos origen y destino de /register-individual y /register. Puedes buscar por nombre o ubicación.'
 };
 
@@ -103,6 +132,27 @@ const REAL_RESPONSES = {
       "phone": 955890830,
       "ubigeo": { "district": "SANTA ANITA", "province": "LIMA", "department": "LIMA" }
     }
+  },
+  '/ticket-pdf': {
+    "success": true,
+    "content_type": "application/pdf",
+    "encoding": "base64",
+    "base64": "JVBERi0xLjQKJeLjz9MK...  [base64 del PDF — típicamente 35KB / ~48k chars]",
+    "status_code": 200
+  },
+  '/ticket-image': {
+    "success": true,
+    "content_type": "image/png",
+    "encoding": "base64",
+    "base64": "iVBORw0KGgoAAAANSUhEUgAA...  [base64 del PNG — típicamente 193KB / ~260k chars]",
+    "status_code": 200
+  },
+  '/label': {
+    "success": true,
+    "content_type": "application/pdf",
+    "encoding": "base64",
+    "base64": "JVBERi0xLjQKJeLjz9MK...  [base64 del PDF — típicamente 560KB / ~770k chars]",
+    "status_code": 200
   }
 };
 
@@ -169,6 +219,92 @@ const generateFallbackExample = (schema) => {
   return example;
 };
 
+// Preview embebido + descarga para respuestas binarias (PDF/PNG/JPG en base64).
+// Convierte el base64 a Blob → object URL una sola vez (cuando llega la respuesta)
+// para que el <embed>/<img> no re-decode en cada render.
+function BinaryPreview({ response, orderHint = {}, pathHint = '' }) {
+  const { content_type: contentType, base64: b64 } = response;
+  const [blobUrl, setBlobUrl] = useState(null);
+  const [sizeKB, setSizeKB] = useState(0);
+
+  useEffect(() => {
+    if (!b64) return;
+    const blob = base64ToBlob(b64, contentType || 'application/octet-stream');
+    const url = URL.createObjectURL(blob);
+    setBlobUrl(url);
+    setSizeKB(blob.size / 1024);
+    return () => URL.revokeObjectURL(url);
+  }, [b64, contentType]);
+
+  const isPdf = (contentType || '').includes('pdf');
+  const isImage = (contentType || '').startsWith('image/');
+  const order = orderHint.orderNumber || 'archivo';
+  const code = orderHint.orderCode || '';
+  const ext = isPdf ? 'pdf' : (contentType === 'image/png' ? 'png' : (contentType === 'image/jpeg' ? 'jpg' : 'bin'));
+  const tag = pathHint.replace(/^\//, '').replace(/-/g, '_') || 'shalom';
+  const filename = `${tag}_${order}${code ? '_' + code : ''}.${ext}`;
+
+  if (!blobUrl) {
+    return <div className="text-xs text-slate-400 font-mono">Decodificando base64…</div>;
+  }
+
+  return (
+    <div className="flex flex-col gap-3 h-full">
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 px-2 py-1 rounded font-mono">
+          {contentType}
+        </span>
+        <span className="bg-slate-700/50 text-slate-300 px-2 py-1 rounded font-mono">
+          {sizeKB.toFixed(1)} KB
+        </span>
+        <span className="bg-slate-700/50 text-slate-400 px-2 py-1 rounded font-mono">
+          base64: {b64.length.toLocaleString()} chars
+        </span>
+        <a
+          href={blobUrl}
+          download={filename}
+          className="ml-auto bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-3 py-1.5 rounded-lg flex items-center gap-2 transition-colors"
+        >
+          <Download className="w-3.5 h-3.5" /> Descargar {filename}
+        </a>
+      </div>
+
+      <div className="flex-1 min-h-[260px] bg-black/30 rounded-lg overflow-hidden border border-slate-700/50">
+        {isPdf && (
+          <embed
+            src={blobUrl}
+            type="application/pdf"
+            className="w-full h-full min-h-[260px]"
+          />
+        )}
+        {isImage && (
+          <div className="w-full h-full flex items-center justify-center p-3">
+            <img
+              src={blobUrl}
+              alt={`Preview ${pathHint}`}
+              className="max-w-full max-h-[400px] object-contain rounded bg-white shadow-lg"
+            />
+          </div>
+        )}
+        {!isPdf && !isImage && (
+          <div className="p-4 text-xs text-slate-400 font-mono">
+            Tipo no previsualizable ({contentType}). Usá el botón descargar.
+          </div>
+        )}
+      </div>
+
+      <details className="text-xs text-slate-400">
+        <summary className="cursor-pointer hover:text-slate-200 select-none flex items-center gap-2">
+          <FileJson className="w-3 h-3" /> Ver respuesta JSON cruda (con base64 truncado)
+        </summary>
+        <pre className="mt-2 text-[10px] text-[#a6e3a1] font-mono whitespace-pre-wrap leading-relaxed bg-black/30 p-3 rounded-lg">
+          {JSON.stringify(summarizeBinaryResponse(response), null, 2)}
+        </pre>
+      </details>
+    </div>
+  );
+}
+
 export default function ClientDocs() {
   const [searchParams] = useSearchParams();
   const token = searchParams.get('token');
@@ -189,7 +325,7 @@ export default function ClientDocs() {
     if (token) {
       axios.post(`${API_BASE}/auth/magic`, { token })
         .then(res => setClientData(res.data.client))
-        .catch(err => setError('Token inválido o expirado. Solicita uno nuevo a tu administrador.'));
+        .catch(err => setError('Token inválido o revocado. Solicita uno nuevo a tu administrador.'));
     } else {
       setError('No se proporcionó token de acceso.');
     }
@@ -588,6 +724,53 @@ export default function ClientDocs() {
                 </div>
               )}
 
+              {BINARY_PATHS.has(activePath) && (
+                <div className="bg-indigo-50 border border-indigo-200 rounded-2xl overflow-hidden">
+                  <div className="px-5 py-3 border-b border-indigo-200 bg-indigo-100 flex items-center gap-2">
+                    {activePath === '/ticket-image' ? <ImageIcon className="w-4 h-4 text-indigo-700" /> : <FileText className="w-4 h-4 text-indigo-700" />}
+                    <h3 className="text-sm font-bold text-indigo-800 uppercase tracking-wider">Cómo usar el base64 que devuelve este endpoint</h3>
+                  </div>
+                  <div className="px-5 py-4 text-xs text-indigo-900 space-y-3">
+                    <p>
+                      Este endpoint devuelve un JSON con el archivo en <code className="font-mono bg-indigo-200/60 px-1 rounded">base64</code>.
+                      En el <strong>playground a la derecha</strong>, al ejecutar la petición vas a ver el preview embebido + botón <strong>Descargar</strong>.
+                      Para integrarlo en tu CRM/sistema, decodificá así:
+                    </p>
+
+                    <div>
+                      <div className="text-[10px] uppercase font-bold text-indigo-600 mb-1">JavaScript (browser)</div>
+                      <pre className="bg-slate-900 text-slate-100 p-3 rounded-lg font-mono text-[11px] overflow-x-auto leading-relaxed">{`const res = await fetch(API + '/proxy', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY },
+  body: JSON.stringify({ method: 'post', path: '${activePath}',
+    body: { orderNumber, orderCode } })
+}).then(r => r.json());
+
+const bytes = Uint8Array.from(atob(res.base64), c => c.charCodeAt(0));
+const blob = new Blob([bytes], { type: res.content_type });
+const url  = URL.createObjectURL(blob);
+window.open(url);   // o <embed src={url}> / <img src={url}>`}</pre>
+                    </div>
+
+                    <div>
+                      <div className="text-[10px] uppercase font-bold text-indigo-600 mb-1">Python</div>
+                      <pre className="bg-slate-900 text-slate-100 p-3 rounded-lg font-mono text-[11px] overflow-x-auto leading-relaxed">{`import base64, requests
+r = requests.post(f"{API}/proxy",
+    headers={"x-api-key": API_KEY},
+    json={"method": "post", "path": "${activePath}",
+          "body": {"orderNumber": "81221187", "orderCode": "3WHN"}})
+data = r.json()
+with open("ticket.${activePath === '/ticket-image' ? 'png' : 'pdf'}", "wb") as f:
+    f.write(base64.b64decode(data["base64"]))`}</pre>
+                    </div>
+
+                    <p className="text-[11px] italic text-indigo-700">
+                      💡 El campo <code className="font-mono">content_type</code> te indica si es <code className="font-mono">application/pdf</code>, <code className="font-mono">image/png</code> o <code className="font-mono">image/jpeg</code> — útil para setear la extensión del archivo al guardarlo.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {(['/register-individual', '/register', '/quote'].includes(activePath)) && terminals.length > 0 && (
                 <div className="bg-amber-50 border border-amber-200 rounded-2xl overflow-hidden">
                   <div className="px-5 py-3 border-b border-amber-200 bg-amber-100 flex items-center gap-2">
@@ -759,9 +942,15 @@ export default function ClientDocs() {
                     </div>
                     <div className="p-4 overflow-y-auto flex-1 custom-scrollbar">
                       {liveResponse ? (
-                        <pre className="text-xs text-[#a6e3a1] font-mono whitespace-pre-wrap leading-relaxed">
-                          {JSON.stringify(liveResponse, null, 2)}
-                        </pre>
+                        liveResponse.encoding === 'base64' && liveResponse.base64 ? (
+                          <BinaryPreview response={liveResponse} orderHint={(() => {
+                            try { return JSON.parse(requestBody || '{}'); } catch { return {}; }
+                          })()} pathHint={activePath} />
+                        ) : (
+                          <pre className="text-xs text-[#a6e3a1] font-mono whitespace-pre-wrap leading-relaxed">
+                            {JSON.stringify(liveResponse, null, 2)}
+                          </pre>
+                        )
                       ) : (
                         <div className="h-full flex flex-col items-center justify-center text-slate-600 text-xs font-mono gap-3">
                           <Terminal className="w-8 h-8 opacity-40" />

@@ -5,10 +5,22 @@ from typing import Optional, Any
 import requests
 import os
 import time
+import base64
 from datetime import datetime
 from dotenv import load_dotenv
 import database
 from mangum import Mangum
+
+# Content-Types binarios que NO deben pasar por resp.text (UTF-8) porque corrompen
+# el archivo. Para estos, el proxy devuelve {encoding: "base64", base64: "..."} y
+# el CRM cliente abre el archivo correctamente.
+BINARY_CONTENT_TYPES = {
+    "application/pdf",
+    "image/png",
+    "image/jpeg",
+    "image/jpg",
+    "application/octet-stream",
+}
 
 # Load env from .env.local (one level up from backend/) if exists
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env.local')
@@ -69,8 +81,9 @@ def get_shalom_user_document(instance_id: str, api_key_to_use: str) -> Optional[
         )
         if resp.status_code == 200:
             data = resp.json()
-            person = data.get("person", {})
-            document = str(person.get("document", "")).strip()
+            person = data.get("person") or {}
+            company = data.get("company") or {}
+            document = str(person.get("document") or company.get("number_document", "")).strip()
             if document:
                 _user_cache[instance_id] = {
                     "document": document,
@@ -97,12 +110,13 @@ def get_shalom_user_full(instance_id: str, api_key_to_use: str) -> Optional[dict
         )
         if resp.status_code == 200:
             data = resp.json()
-            person = data.get("person", {})
+            person = data.get("person") or {}
+            company = data.get("company") or {}
             return {
-                "person_id": data.get("person_id"),
-                "full_name": person.get("full_name"),
-                "document": str(person.get("document", "")).strip(),
-                "phone": person.get("phone"),
+                "person_id": data.get("person_id") or company.get("id"),
+                "full_name": person.get("full_name") or company.get("legal_name"),
+                "document": str(person.get("document") or company.get("number_document", "")).strip(),
+                "phone": person.get("phone") or company.get("phone"),
             }
     except Exception as e:
         print(f"[get-user] Error: {e}")
@@ -355,12 +369,11 @@ def get_client_shalom_user(client_id: str, is_admin: bool = Depends(verify_admin
 # ─────────────────────────────────────────────
 @app.post("/auth/magic")
 def magic_login(payload: MagicLogin):
+    # El magic token no expira. Revocación: admin desactiva el cliente
+    # (status: inactive) o regenera el token vía /admin/clients/:id/regenerate-token.
     client = database.get_client_by_token(payload.token)
     if not client:
         raise HTTPException(status_code=401, detail="Invalid token")
-    expires_at = datetime.fromisoformat(client["token_expires_at"])
-    if datetime.now() > expires_at:
-        raise HTTPException(status_code=401, detail="Token has expired")
     return {
         "success": True,
         "client": {
@@ -524,6 +537,18 @@ def proxy_request(req: ProxyRequest, x_api_key: str = Header(None)):
             resp = requests.post(url, headers=forward_headers, json=body, timeout=15)
         else:
             raise HTTPException(status_code=400, detail="Método no soportado.")
+
+        # Detectar binarios (PDF/PNG/JPG) y devolver base64 antes de intentar JSON.
+        # resp.text fuerza UTF-8 y corrompe el binario.
+        content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if content_type in BINARY_CONTENT_TYPES:
+            return {
+                "success": True,
+                "content_type": content_type,
+                "encoding": "base64",
+                "base64": base64.b64encode(resp.content).decode("ascii"),
+                "status_code": resp.status_code,
+            }
 
         try:
             shalom_response = resp.json()

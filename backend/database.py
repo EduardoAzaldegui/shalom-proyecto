@@ -5,6 +5,12 @@ import hashlib
 from datetime import datetime, timedelta
 from boto3.dynamodb.conditions import Key
 
+# Magic tokens no expiran. Mantenemos el campo `token_expires_at` con una fecha
+# muy lejana para compatibilidad con datos existentes y por si en el futuro se
+# reactiva la expiración. La revocación se hace vía status: inactive o
+# /admin/clients/:id/regenerate-token.
+TOKEN_TTL_DAYS = 365 * 100
+
 # Use environment variables injected by Serverless Framework
 CLIENTS_TABLE = os.environ.get('CLIENTS_TABLE', 'shalom-proxy-api-clients-dev')
 ADMIN_TABLE = os.environ.get('ADMIN_TABLE', 'shalom-proxy-api-admin-dev')
@@ -54,7 +60,7 @@ def create_client(name, email, instance_id, api_key, shalom_username, shalom_pas
     table = get_clients_table()
     client_id = str(uuid.uuid4())
     magic_token = str(uuid.uuid4())
-    expires_at = (datetime.now() + timedelta(days=1)).isoformat()
+    expires_at = (datetime.now() + timedelta(days=TOKEN_TTL_DAYS)).isoformat()
     created_at = datetime.now().isoformat()
     
     item = {
@@ -91,7 +97,7 @@ def get_clients():
 def regenerate_magic_token(client_id):
     table = get_clients_table()
     magic_token = str(uuid.uuid4())
-    expires_at = (datetime.now() + timedelta(days=1)).isoformat()
+    expires_at = (datetime.now() + timedelta(days=TOKEN_TTL_DAYS)).isoformat()
     
     table.update_item(
         Key={'id': client_id},
@@ -114,9 +120,7 @@ def get_client_by_token(magic_token):
         if items:
             item = items[0]
             if item.get('status') == 'active':
-                expires_at = datetime.fromisoformat(item['token_expires_at'])
-                if datetime.now() <= expires_at:
-                    return item
+                return item
     except Exception as e:
         print(f"Error getting client by token: {e}")
     return None
