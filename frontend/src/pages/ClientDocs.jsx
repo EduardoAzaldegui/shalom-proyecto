@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import axios from 'axios';
-import { Terminal, Key, Copy, CheckCircle2, Server, BookOpen, Play, AlertTriangle, FileJson, Loader2, Download, FileText, Image as ImageIcon } from 'lucide-react';
+import { Terminal, Key, Copy, CheckCircle2, Server, BookOpen, Play, AlertTriangle, FileJson, Loader2, Download, FileText, Image as ImageIcon, Sparkles, ExternalLink, ChevronDown, ChevronUp } from 'lucide-react';
 import Editor from '@monaco-editor/react';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'https://9lrgs4st13.execute-api.us-east-1.amazonaws.com/dev';
@@ -218,6 +218,103 @@ const generateFallbackExample = (schema) => {
   }
   return example;
 };
+
+// Panel para compartir el endpoint llms.txt con un LLM (Claude/GPT/etc).
+// El LLM hace fetch al URL y obtiene TODA la API + credenciales del cliente
+// embebidas, listo para asistir con integraciones y armar requests.
+function LLMSharePanel({ apiBase, token, clientName }) {
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(null);
+
+  const llmsUrl = `${apiBase}/llms.txt?token=${token}`;
+  const suggestedPrompt = `Usá este archivo como referencia exclusiva de la API de Shalom Proxy:
+${llmsUrl}
+
+Toda llamada a Shalom debe ir a POST /proxy con el wrapper {method, path, body}.
+No inventes instanceId — el servidor lo inyecta. Las credenciales (x-api-key) están en la sección Credenciales del archivo.
+Devolveme los curl ya armados con headers y body completos.`;
+
+  const copy = (text, id) => {
+    navigator.clipboard.writeText(text);
+    setCopied(id);
+    setTimeout(() => setCopied(null), 2000);
+  };
+
+  return (
+    <div className="mb-6 bg-gradient-to-r from-violet-50 to-fuchsia-50 border border-violet-200 rounded-xl shadow-sm overflow-hidden">
+      <div className="flex items-center gap-3 px-5 py-3">
+        <div className="bg-violet-600 text-white p-2 rounded-lg">
+          <Sparkles className="w-4 h-4" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-[10px] uppercase tracking-widest font-bold text-violet-600">Integración con IA</div>
+          <div className="text-sm font-bold text-violet-900">
+            Compartí este link con tu LLM (Claude, ChatGPT, etc.) — recibe toda la API + tus credenciales listas para usar
+          </div>
+        </div>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="text-violet-600 hover:text-violet-900 text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-violet-100 flex items-center gap-1 transition-colors"
+        >
+          {expanded ? <>Ocultar <ChevronUp className="w-3 h-3" /></> : <>Ver detalle <ChevronDown className="w-3 h-3" /></>}
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="px-5 pb-5 pt-1 space-y-4 border-t border-violet-200">
+          <div>
+            <div className="text-[10px] uppercase font-bold text-violet-600 mb-1.5">URL llms.txt — pegásela a tu LLM</div>
+            <div className="flex items-center gap-2 bg-white border border-violet-200 rounded-lg p-2.5">
+              <code className="flex-1 text-xs text-violet-900 font-mono truncate" title={llmsUrl}>{llmsUrl}</code>
+              <a
+                href={llmsUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-violet-600 hover:text-violet-900 p-1.5 rounded hover:bg-violet-50 transition-colors"
+                title="Abrir en nueva pestaña"
+              >
+                <ExternalLink className="w-4 h-4" />
+              </a>
+              <button
+                onClick={() => copy(llmsUrl, 'llms-url')}
+                className="bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold px-3 py-1.5 rounded flex items-center gap-1.5 transition-colors"
+              >
+                {copied === 'llms-url' ? <><CheckCircle2 className="w-3 h-3" /> Copiado</> : <><Copy className="w-3 h-3" /> Copiar</>}
+              </button>
+            </div>
+            <p className="text-[11px] text-violet-700 mt-1.5 italic">
+              Este link contiene credenciales únicas de <strong>{clientName}</strong>. Trátalo como una contraseña — solo compartilo con LLMs/herramientas en las que confíes.
+            </p>
+          </div>
+
+          <div>
+            <div className="text-[10px] uppercase font-bold text-violet-600 mb-1.5">Prompt sugerido — pegá esto en la conversación con tu LLM</div>
+            <div className="bg-white border border-violet-200 rounded-lg p-3 relative">
+              <pre className="text-xs text-slate-800 font-mono whitespace-pre-wrap leading-relaxed pr-10">{suggestedPrompt}</pre>
+              <button
+                onClick={() => copy(suggestedPrompt, 'prompt')}
+                className="absolute top-2 right-2 text-violet-600 hover:text-violet-900 p-1.5 rounded hover:bg-violet-50 transition-colors"
+                title="Copiar prompt"
+              >
+                {copied === 'prompt' ? <CheckCircle2 className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+
+          <div className="text-[11px] text-violet-700 space-y-1 bg-white/50 rounded-lg p-3">
+            <div className="font-bold text-violet-900">¿Qué incluye llms.txt?</div>
+            <ul className="list-disc ml-4 space-y-0.5">
+              <li>Tu <code className="font-mono bg-violet-100 px-1 rounded">api_key</code> e <code className="font-mono bg-violet-100 px-1 rounded">instance_id</code> embebidos — el LLM puede armar requests sin pedírtelos</li>
+              <li>Los 12+ endpoints con sus params, body shape y respuestas de ejemplo</li>
+              <li>Reglas críticas: ownership filter, base64 para binarios, master-key paths, instance injection</li>
+              <li>Manejo de errores típicos (401, 403, 404, 504) y cómo refrescar la sesión</li>
+            </ul>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // Preview embebido + descarga para respuestas binarias (PDF/PNG/JPG en base64).
 // Convierte el base64 a Blob → object URL una sola vez (cuando llega la respuesta)
@@ -626,7 +723,10 @@ export default function ClientDocs() {
 
         {/* Main Content */}
         <main className="flex-1 overflow-y-auto p-8 h-[calc(100vh-68px)] relative pb-32">
-          
+
+          {/* LLM Share Panel — siempre visible */}
+          <LLMSharePanel apiBase={API_BASE} token={token} clientName={clientData.name} />
+
           {/* Warning Banner */}
           {WARNINGS[activePath] && (
             <div className="mb-6 bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-start gap-3 shadow-sm">

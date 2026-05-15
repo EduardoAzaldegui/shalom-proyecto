@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from typing import Optional, Any
 import requests
@@ -614,6 +615,222 @@ def proxy_request(req: ProxyRequest, x_api_key: str = Header(None)):
         raise HTTPException(status_code=504, detail="Shalom API timeout. Intentá de nuevo.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─────────────────────────────────────────────
+#  llms.txt — Contexto estructurado para LLMs (estándar llmstxt.org)
+#  El cliente le pasa este URL a su LLM (Claude/GPT/etc) y el LLM
+#  obtiene TODA la API, sus credenciales y las reglas de uso.
+# ─────────────────────────────────────────────
+def _render_llms_txt(client: Optional[dict] = None) -> str:
+    api_base = os.environ.get("PUBLIC_API_BASE", "https://9lrgs4st13.execute-api.us-east-1.amazonaws.com/dev")
+    if client:
+        client_name = client.get("name", "")
+        api_key = client.get("api_key", "")
+        instance_id = client.get("instance_id", "")
+        person_doc = client.get("person_document", "")
+        person_name = client.get("person_name", "")
+        creds_block = f"""## Credenciales (auto-inyectadas — listas para usar)
+
+Estas credenciales pertenecen al cliente **{client_name}** y deben usarse en TODAS las llamadas a `/proxy`:
+
+- `api_base`: `{api_base}`
+- `x-api-key` (header): `{api_key}`
+- `instance_id`: `{instance_id}`  ← el proxy lo inyecta solo, no lo agregues al body manualmente
+- Remitente registrado (ownership): `{person_name}` — DNI/RUC `{person_doc}`
+"""
+    else:
+        creds_block = f"""## Credenciales
+
+Esta es la vista genérica de llms.txt. Para obtener credenciales personalizadas (api_key e instance_id auto-inyectadas), pedile al administrador que te genere un magic token y volvé a abrir:
+
+`{api_base}/llms.txt?token=<tu_magic_token>`
+
+API base por defecto: `{api_base}`
+"""
+
+    return f"""# Shalom API Management Portal — Proxy Seguro
+
+> Plataforma serverless que enruta operaciones de envío hacia la API oficial de Shalom Perú con inyección automática de credenciales, validación de ownership de guías y conversión de binarios a base64. Tu LLM puede usar este archivo como contexto para asistir con integraciones, generación de payloads y resolución de errores.
+
+{creds_block}
+
+## Reglas críticas (leé esto antes de generar requests)
+
+1. **Toda llamada a Shalom pasa por** `POST {api_base}/proxy` con el header `x-api-key`. NO llames directo a `https://ecomapp.shalom-api.lat`.
+2. **El proxy inyecta `instanceId` automáticamente** en los endpoints que lo requieren: `/register-individual`, `/register`, `/pending-shipments`, `/get-user`, `/update-password`, `/update-contact-1`, `/update-contact-2`, `/quote`, `/ticket-image`, `/ticket-pdf`, `/label`. NO incluyas `instanceId` en el body.
+3. **Endpoints master (no requieren credenciales del usuario, solo la api_key del cliente)**: `/quote`, `/track`, `/track-massive`, `/ticket-image`, `/ticket-pdf`, `/label`, `/list`, `/list-minimal`, `/status`, `/instances`.
+4. **Ownership filter** en `/track`, `/track-massive`, `/ticket-image`, `/ticket-pdf`, `/label`: el proxy verifica que la guía pertenezca al DNI/RUC del cliente. Guías ajenas → `403`.
+5. **Binarios devuelven base64** (NO raw bytes ni raw_text): `/ticket-pdf`, `/ticket-image`, `/label` → JSON `{{"success": true, "content_type": "...", "encoding": "base64", "base64": "...", "status_code": 200}}`. Decodificá con `atob` (JS) o `base64.b64decode` (Python).
+6. **`/login` y `/logout` están bloqueados** desde `/proxy`. Para renovar la sesión Shalom, usá `POST {api_base}/auth/refresh-session` con el magic token.
+7. **Bloqueo de input**: el campo `clave` en endpoints empresariales requiere los 4 dígitos del PIN Shalom (NO la contraseña).
+
+## Wrapper request — formato OBLIGATORIO para POST /proxy
+
+```json
+{{
+  "method": "post",
+  "path": "/track",
+  "body": {{ "orderNumber": "81221187", "orderCode": "3WHN" }}
+}}
+```
+
+- `method`: `"get"` o `"post"`.
+- `path`: el path de Shalom (ej: `/track`, `/register-individual`).
+- `body`: el payload de negocio sin `instanceId` (el proxy lo agrega).
+
+## Endpoints disponibles
+
+### POST /proxy → /track  — Rastrear envío individual
+
+Devuelve el estado actual del envío y datos del remitente/destinatario.
+
+**Body**:
+- `orderNumber` (string, requerido) — Número de guía de 8 dígitos.
+- `orderCode` (string, requerido) — Código de 4 letras (ej: `WHPM`, `3WHN`).
+
+**Ejemplo**:
+```bash
+curl -X POST {api_base}/proxy \\
+  -H "Content-Type: application/json" \\
+  -H "x-api-key: {client.get('api_key', '<TU_API_KEY>') if client else '<TU_API_KEY>'}" \\
+  -d '{{"method":"post","path":"/track","body":{{"orderNumber":"81221187","orderCode":"3WHN"}}}}'
+```
+
+**Response 200**: `{{ "search": {{ "data": {{ "remitente": {{ "documento": "..." }} }} }}, "statuses": {{ "message": "En tránsito" }} }}`. **403** si la guía no es del cliente.
+
+---
+
+### POST /proxy → /track-massive  — Rastreo en lote
+
+**Body**: `{{ "orders": [{{ "orderNumber": "...", "orderCode": "..." }}, ...] }}` (hasta 50).
+Filtra silenciosamente guías que no pertenecen al cliente.
+
+---
+
+### POST /proxy → /ticket-pdf  — PDF del ticket
+
+**Body**: `{{ "orderNumber": "...", "orderCode": "..." }}`.
+**Response 200**: `{{ "encoding": "base64", "content_type": "application/pdf", "base64": "JVBERi0xLjQK..." }}`. PDF ~35KB. Solo después de recepción física.
+
+---
+
+### POST /proxy → /ticket-image  — PNG del ticket
+
+**Body**: `{{ "orderNumber": "...", "orderCode": "..." }}`.
+**Response 200**: `{{ "encoding": "base64", "content_type": "image/png", "base64": "iVBORw0KGgo..." }}`. PNG ~190KB.
+
+---
+
+### POST /proxy → /label  — Etiqueta PDF de despacho
+
+**Body**: `{{ "orderNumber": "...", "orderCode": "..." }}`.
+**Response 200**: `{{ "encoding": "base64", "content_type": "application/pdf", "base64": "..." }}`. PDF ~560KB.
+
+---
+
+### POST /proxy → /register-individual  — Crear envío individual
+
+⚠️ **PRODUCCIÓN**: cada llamada genera una guía REAL y cargo.
+
+**Body** (sin `instanceId`):
+- `origen` (number) — `ter_id` numérico de la terminal origen (ver `/terminals`).
+- `destino` (number) — `ter_id` destino. Para envío aéreo el string puede empezar con `"0"` (ej `"052"`).
+- `documento` (string) — DNI/RUC del destinatario.
+- `name`, `firstname`, `lastname`, `phone`.
+- `content` (string) — descripción del paquete (ej `"SOBRE"`).
+- `peso`, `alto`, `ancho`, `largo` (number) — dimensiones.
+- `cantidad` (number).
+- `clave` (string) — PIN de 4 dígitos de la cuenta Shalom Pro.
+
+**Response 200**: `{{ "success": true, "data": {{ "guia": 79417376, "codigo": "9WWH", "ose_id": ..., "precio": 8 }} }}`.
+
+---
+
+### POST /proxy → /register  — Crear envíos en lote
+
+**Body**: `{{ "shipments": [{{ "origin": 71, "destination": 293, "documento": "...", ... }}, ...] }}`.
+
+---
+
+### POST /proxy → /quote  — Cotizar costo de envío
+
+**Body**: `{{ "origen": 71, "destino": 293, "peso": 1, "alto": 20, "ancho": 20, "largo": 20, "cantidad": 1 }}`.
+
+---
+
+### POST /proxy → /pending-shipments  — Listar envíos pendientes
+
+**Body**: `{{}}`.
+**Response 200**: objeto indexado por número (`{{"0": {{...}}, "1": {{...}}}}`). Cada item incluye `service_order_guia_empresarial` (= `orderNumber`) y `code_service_order_empresarial` (= `orderCode`).
+
+---
+
+### POST /proxy → /get-user  — Datos del remitente registrado
+
+**Body**: `{{}}`.
+**Response 200**: incluye `person.full_name`, `person.document` (DNI usado para ownership), `person.phone`, `person.ubigeo`.
+
+---
+
+### POST /proxy → /update-password, /update-contact-1, /update-contact-2
+
+Mantenimiento del perfil del remitente. Body con los nuevos valores.
+
+---
+
+### GET {api_base}/terminals?search=<query>  — Catálogo de agencias
+
+NO va por `/proxy`. Endpoint propio del backend. Devuelve catálogo con `ter_id` para usar en `origen`/`destino`. Caché 1h.
+
+**Response 200**: `{{ "count": 547, "terminals": [{{ "ter_id": 71, "name": "SANTA ANITA", "ubigeo": "LIMA - LIMA - SANTA ANITA", "abbr": "STA" }}, ...] }}`.
+
+---
+
+### POST {api_base}/auth/refresh-session  — Renovar sesión Shalom
+
+Si recibís 401 desde Shalom, llamá esto con el magic token para que el proxy haga login interno de nuevo.
+**Body**: `{{ "token": "<magic_token>" }}`.
+
+---
+
+### POST {api_base}/auth/magic  — Validar magic token
+
+**Body**: `{{ "token": "<magic_token>" }}`.
+**Response 200**: `{{ "success": true, "client": {{ "name", "email", "instanceId", "apiKey" }} }}`. El token nunca expira; la revocación se hace por status:inactive o regenerate-token (admin).
+
+## Errores típicos
+
+- `401 Missing x-api-key header` → te faltó el header `x-api-key` en `/proxy`.
+- `401 API Key inválida` → la api_key no existe o el cliente está inactivo.
+- `403 Acceso denegado: esta guía no pertenece a tu cuenta` → la guía es de otro DNI. Solo podés operar tus propias guías.
+- `403 El proxy gestiona la autenticación automáticamente` → intentaste llamar `/login` o `/logout` vía `/proxy` (bloqueado).
+- `404 La guía solicitada no fue encontrada` → orderNumber+orderCode no existen en Shalom.
+- `504 Shalom API timeout` → reintentar.
+
+## Prompt sugerido para tu LLM
+
+```
+Usá este archivo como referencia exclusiva de la API de Shalom Proxy: {api_base}/llms.txt?token={(client.get('magic_token', '<token>') if client else '<token>')}
+
+Toda llamada a Shalom debe ir a POST /proxy con el wrapper {{method, path, body}}.
+No inventes instanceId — el servidor lo inyecta. Si necesitás credenciales (api_key) están en la sección Credenciales arriba.
+Devolvé los curl ya armados con headers y body completos.
+```
+"""
+
+
+@app.get("/llms.txt", response_class=PlainTextResponse)
+def llms_txt(token: Optional[str] = None):
+    """Markdown contextual para LLMs siguiendo el estándar llmstxt.org.
+    Si recibe ?token=<magic>, embebe las credenciales del cliente."""
+    client = None
+    if token:
+        client = database.get_client_by_token(token)
+    return PlainTextResponse(
+        _render_llms_txt(client),
+        media_type="text/markdown",
+    )
 
 
 @app.get("/")
