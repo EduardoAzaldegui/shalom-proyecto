@@ -1,11 +1,12 @@
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, Any
 import requests
 import os
 import time
+import json
 import base64
 from datetime import datetime
 from dotenv import load_dotenv
@@ -150,6 +151,170 @@ def extract_sender_documents_from_track_massive(response_data: dict) -> list[str
     except Exception:
         pass
     return docs
+
+
+# ─────────────────────────────────────────────
+#  Clasificación y tipado de errores del proxy
+#
+#  Todo error que sale del proxy lleva un envelope con un TAG de origen
+#  (`error.source`) para que el cliente sepa de quién es la culpa:
+#    - shalom_session  → la sesión Shalom de esa instancia venció / auto-login
+#                        falló. Recuperable re-logueando. HTTP 401.
+#    - shalom_down      → Shalom no responde (timeout / conexión / 502/503/504).
+#                        HTTP 503/504. NO es culpa del cliente ni del proxy.
+#    - shalom_upstream  → Shalom respondió un error de negocio (4xx/5xx). Se
+#                        propaga el status real de Shalom.
+#    - proxy_internal   → error nuestro (DB, bug, etc.). HTTP 500.
+# ─────────────────────────────────────────────
+
+# Marcadores que indican que la sesión Shalom expiró y el auto-login falló.
+# Se buscan (lowercase) en el body de la respuesta de Shalom.
+_SESSION_ERROR_MARKERS = (
+    "auto-login failed",
+    "max retries",
+    "call /login",
+    "llamar a /login",
+    "session expired",
+    "sesión expir",
+    "sesion expir",
+    "no autorizado",
+    "unauthorized",
+    "token expir",
+)
+
+
+def _payload_text(payload: Any) -> str:
+    """Serializa el body de Shalom a texto lowercase para buscar marcadores."""
+    if payload is None:
+        return ""
+    if isinstance(payload, str):
+        return payload.lower()
+    try:
+        return json.dumps(payload, ensure_ascii=False).lower()
+    except Exception:
+        return str(payload).lower()
+
+
+def _is_session_error(status_code: int, payload: Any) -> bool:
+    """
+    True si la respuesta de Shalom indica sesión vencida / auto-login fallido.
+    Detecta tanto por status 401 como por los marcadores de texto (Shalom a
+    veces devuelve el error de auto-login con status 500 o incluso 200).
+    """
+    if status_code == 401:
+        return True
+    text = _payload_text(payload)
+    return any(marker in text for marker in _SESSION_ERROR_MARKERS)
+
+
+def _extract_message(payload: Any, default: str) -> str:
+    """Extrae el mensaje legible del body de error de Shalom."""
+    if isinstance(payload, dict):
+        for key in ("message", "error", "detail", "msg"):
+            val = payload.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+            if isinstance(val, dict):
+                inner = val.get("message") or val.get("detail")
+                if isinstance(inner, str) and inner.strip():
+                    return inner.strip()
+    if isinstance(payload, str) and payload.strip():
+        return payload.strip()[:500]
+    return default
+
+
+def _error_envelope(source: str, code: str, message: str, path: str,
+                    http_status: int, upstream_status: Optional[int] = None,
+                    recovery_attempted: Optional[bool] = None) -> JSONResponse:
+    """Construye la respuesta de error tipada con el status HTTP elegido."""
+    err = {
+        "source": source,
+        "code": code,
+        "message": message,
+        "path": path,
+    }
+    if upstream_status is not None:
+        err["upstream_status"] = upstream_status
+    if recovery_attempted is not None:
+        err["recovery_attempted"] = recovery_attempted
+    return JSONResponse(
+        status_code=http_status,
+        content={"success": False, "error": err},
+    )
+
+
+def _shalom_relogin(client: dict) -> bool:
+    """
+    Re-loguea la instancia del cliente en Shalom usando las credenciales
+    guardadas en DynamoDB. Devuelve True si Shalom aceptó el login.
+    Esto es lo que hace al proxy "auto-gestionar la auth": si la sesión venció,
+    la renueva solo antes de reintentar el request original.
+    """
+    username = client.get("shalom_username")
+    instance_id = client.get("instance_id")
+    if not username or not instance_id:
+        return False
+    try:
+        r = requests.post(
+            f"{SHALOM_API_URL}/login",
+            headers={"x-api-key": SHALOM_API_KEY_MASTER, "Content-Type": "application/json"},
+            json={
+                "instanceId": instance_id,
+                "username": username,
+                "password": client.get("shalom_password", ""),
+            },
+            timeout=15,
+        )
+        return r.status_code in (200, 201)
+    except Exception as e:
+        print(f"[auth] Re-login falló para instance {instance_id}: {e}")
+        return False
+
+
+def _classify_shalom_error(resp, payload: Any, path: str,
+                           recovery_attempted: bool) -> JSONResponse:
+    """
+    Convierte una respuesta fallida de Shalom en un envelope tipado con el
+    status HTTP correcto. Asume que ya se determinó que es un error.
+    """
+    status = resp.status_code
+
+    # 1. Sesión vencida / auto-login agotado (recuperable por el admin).
+    if _is_session_error(status, payload):
+        return _error_envelope(
+            source="shalom_session",
+            code="AUTOLOGIN_FAILED",
+            message=(
+                "La sesión de Shalom de esta cuenta expiró y el re-login automático "
+                "no fue aceptado. Verificá que las credenciales Shalom del cliente "
+                "sean válidas (panel admin) o usá /auth/refresh-session."
+            ),
+            path=path,
+            http_status=401,
+            upstream_status=status,
+            recovery_attempted=recovery_attempted,
+        )
+
+    # 2. Shalom caído / no responde correctamente (gateway errors).
+    if status in (502, 503, 504):
+        return _error_envelope(
+            source="shalom_down",
+            code="UPSTREAM_UNAVAILABLE",
+            message=_extract_message(payload, "Shalom no está respondiendo. Intentá de nuevo en unos minutos."),
+            path=path,
+            http_status=503,
+            upstream_status=status,
+        )
+
+    # 3. Error de negocio de Shalom → se propaga su status real.
+    return _error_envelope(
+        source="shalom_upstream",
+        code="SHALOM_ERROR",
+        message=_extract_message(payload, "Shalom rechazó la solicitud."),
+        path=path,
+        http_status=status if status >= 400 else 502,
+        upstream_status=status,
+    )
 
 
 app = FastAPI(title="Shalom API Management Portal", version="2.0")
@@ -366,6 +531,58 @@ def get_client_shalom_user(client_id: str, is_admin: bool = Depends(verify_admin
 
 
 # ─────────────────────────────────────────────
+#  Admin: Health-check de la API de Shalom (tercero)
+#  Permite al admin verificar desde el panel si Shalom está vivo,
+#  midiendo latencia real contra un endpoint liviano con la master key.
+# ─────────────────────────────────────────────
+@app.get("/admin/health/shalom")
+def shalom_health(is_admin: bool = Depends(verify_admin_token)):
+    """
+    Hace un ping real a la API de Shalom (GET /list con la master key) y
+    reporta si está operativa, con latencia y status del upstream.
+    No es un problema del proxy ni de los clientes: refleja SOLO a Shalom.
+    """
+    started = time.time()
+    headers = {"x-api-key": SHALOM_API_KEY_MASTER, "Content-Type": "application/json"}
+    try:
+        resp = requests.get(f"{SHALOM_API_URL}/list", headers=headers, timeout=8)
+        latency_ms = round((time.time() - started) * 1000)
+        if resp.status_code == 200:
+            return {
+                "ok": True,
+                "status": "up",
+                "upstream_status": 200,
+                "latency_ms": latency_ms,
+                "url": SHALOM_API_URL,
+                "message": "Shalom está operativa.",
+            }
+        # Respondió pero con error → degradado/caído según el código.
+        is_down = resp.status_code in (502, 503, 504)
+        return {
+            "ok": False,
+            "status": "down" if is_down else "degraded",
+            "upstream_status": resp.status_code,
+            "latency_ms": latency_ms,
+            "url": SHALOM_API_URL,
+            "message": f"Shalom respondió con HTTP {resp.status_code}.",
+        }
+    except requests.exceptions.Timeout:
+        return {
+            "ok": False, "status": "down", "upstream_status": None,
+            "latency_ms": round((time.time() - started) * 1000),
+            "url": SHALOM_API_URL,
+            "message": "Shalom no respondió a tiempo (timeout). Puede estar caída o saturada.",
+        }
+    except requests.exceptions.RequestException as e:
+        return {
+            "ok": False, "status": "down", "upstream_status": None,
+            "latency_ms": round((time.time() - started) * 1000),
+            "url": SHALOM_API_URL,
+            "message": f"No se pudo conectar con Shalom: {e}",
+        }
+
+
+# ─────────────────────────────────────────────
 #  Client Auth
 # ─────────────────────────────────────────────
 @app.post("/auth/magic")
@@ -531,18 +748,22 @@ def proxy_request(req: ProxyRequest, x_api_key: str = Header(None)):
 
     # 5. Llamar a Shalom
     url = f"{SHALOM_API_URL}{req.path}"
-    try:
+
+    def _do_request():
         if req.method.upper() == "GET":
-            resp = requests.get(url, headers=forward_headers, timeout=15)
+            return requests.get(url, headers=forward_headers, timeout=15)
         elif req.method.upper() == "POST":
-            resp = requests.post(url, headers=forward_headers, json=body, timeout=15)
-        else:
-            raise HTTPException(status_code=400, detail="Método no soportado.")
+            return requests.post(url, headers=forward_headers, json=body, timeout=15)
+        raise HTTPException(status_code=400, detail="Método no soportado.")
+
+    try:
+        resp = _do_request()
 
         # Detectar binarios (PDF/PNG/JPG) y devolver base64 antes de intentar JSON.
-        # resp.text fuerza UTF-8 y corrompe el binario.
+        # resp.text fuerza UTF-8 y corrompe el binario. Solo si la respuesta es OK;
+        # si falló, cae al manejo de error JSON de abajo.
         content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-        if content_type in BINARY_CONTENT_TYPES:
+        if resp.ok and content_type in BINARY_CONTENT_TYPES:
             return {
                 "success": True,
                 "content_type": content_type,
@@ -554,7 +775,40 @@ def proxy_request(req: ProxyRequest, x_api_key: str = Header(None)):
         try:
             shalom_response = resp.json()
         except Exception:
-            return {"raw_text": resp.text, "status_code": resp.status_code}
+            if resp.ok:
+                return {"raw_text": resp.text, "status_code": resp.status_code}
+            shalom_response = resp.text
+
+        # 5.5 ── AUTO-RECUPERACIÓN DE SESIÓN ──────────────────────────────────
+        # Si Shalom dice que la sesión venció / auto-login agotó reintentos, el
+        # proxy se re-loguea solo con las credenciales guardadas y reintenta UNA
+        # vez. Esto es lo que hace que la auth sea realmente "automática".
+        recovery_attempted = False
+        if _is_session_error(resp.status_code, shalom_response) and client.get("shalom_username"):
+            recovery_attempted = True
+            print(f"[auth] Sesión vencida en {req.path} (instance {client.get('instance_id')}). Re-logueando…")
+            if _shalom_relogin(client):
+                resp = _do_request()
+                content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                if resp.ok and content_type in BINARY_CONTENT_TYPES:
+                    return {
+                        "success": True,
+                        "content_type": content_type,
+                        "encoding": "base64",
+                        "base64": base64.b64encode(resp.content).decode("ascii"),
+                        "status_code": resp.status_code,
+                    }
+                try:
+                    shalom_response = resp.json()
+                except Exception:
+                    if resp.ok:
+                        return {"raw_text": resp.text, "status_code": resp.status_code}
+                    shalom_response = resp.text
+
+        # 5.6 ── ERRORES DE SHALOM (status real + envelope tipado) ────────────
+        # Cualquier no-2xx o error de sesión persistente se devuelve clasificado.
+        if not resp.ok or _is_session_error(resp.status_code, shalom_response):
+            return _classify_shalom_error(resp, shalom_response, req.path, recovery_attempted)
 
         # 6. ── OWNERSHIP CHECK ──────────────────────────────────────────────
         # Para endpoints de tracking e imágenes, validar que la guía
@@ -612,9 +866,39 @@ def proxy_request(req: ProxyRequest, x_api_key: str = Header(None)):
     except HTTPException:
         raise
     except requests.exceptions.Timeout:
-        raise HTTPException(status_code=504, detail="Shalom API timeout. Intentá de nuevo.")
+        return _error_envelope(
+            source="shalom_down",
+            code="UPSTREAM_TIMEOUT",
+            message="Shalom no respondió a tiempo. Puede estar saturado o caído. Intentá de nuevo en unos minutos.",
+            path=req.path,
+            http_status=504,
+        )
+    except requests.exceptions.ConnectionError:
+        return _error_envelope(
+            source="shalom_down",
+            code="UPSTREAM_UNREACHABLE",
+            message="No se pudo conectar con Shalom. El servicio parece estar caído.",
+            path=req.path,
+            http_status=503,
+        )
+    except requests.exceptions.RequestException as e:
+        return _error_envelope(
+            source="shalom_upstream",
+            code="UPSTREAM_REQUEST_FAILED",
+            message=f"Fallo al comunicarse con Shalom: {e}",
+            path=req.path,
+            http_status=502,
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Error nuestro (DB, bug, serialización…). Es el único caso 'proxy_internal'.
+        print(f"[proxy] ERROR interno en {req.path}: {e}")
+        return _error_envelope(
+            source="proxy_internal",
+            code="PROXY_INTERNAL_ERROR",
+            message="Error interno del proxy. No es un problema de Shalom.",
+            path=req.path,
+            http_status=500,
+        )
 
 
 # ─────────────────────────────────────────────
@@ -678,6 +962,28 @@ API base por defecto: `{api_base}`
 - `method`: `"get"` o `"post"`.
 - `path`: el path de Shalom (ej: `/track`, `/register-individual`).
 - `body`: el payload de negocio sin `instanceId` (el proxy lo agrega).
+
+## Manejo de errores — IMPORTANTE para tu integración
+
+Todo error sale con el **status HTTP correcto** (NO siempre 200) y un body tipado que te dice DE QUIÉN es la culpa, vía `error.source`:
+
+```json
+{{ "success": false,
+   "error": {{ "source": "shalom_session", "code": "AUTOLOGIN_FAILED",
+              "message": "...", "upstream_status": 500, "path": "/register-individual",
+              "recovery_attempted": true }} }}
+```
+
+Valores de `error.source` (usalo para decidir qué hacer):
+
+| `source` | Significa | HTTP | Qué hacer |
+|----------|-----------|------|-----------|
+| `shalom_session` | La sesión Shalom venció y el re-login automático no fue aceptado | `401` | Avisar al admin que revise las credenciales Shalom del cliente, o llamar `POST {api_base}/auth/refresh-session` |
+| `shalom_down` | Shalom no responde (timeout / conexión / 502-503-504) | `503`/`504` | NO es tu culpa ni de tus datos. Reintentar en unos minutos |
+| `shalom_upstream` | Shalom rechazó la solicitud (datos inválidos, etc.) | status real de Shalom | Corregir el payload según `error.message` |
+| `proxy_internal` | Error interno del proxy (no de Shalom) | `500` | Reportar al equipo del portal |
+
+> El error `"Auto-login failed: Max retries reached"` es `source: shalom_session`. El proxy ya intenta re-loguearse solo (`recovery_attempted: true`); si igual falla, las credenciales Shalom del cliente necesitan revisión.
 
 ## Endpoints disponibles
 

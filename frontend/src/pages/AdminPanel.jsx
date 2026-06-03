@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Copy, RefreshCw, Key, UserPlus, LogOut, Trash2, Power, PowerOff, Loader2, User, X } from 'lucide-react';
+import { Copy, RefreshCw, Key, UserPlus, LogOut, Trash2, Power, PowerOff, Loader2, User, X, Activity } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 
@@ -16,6 +16,8 @@ export default function AdminPanel() {
   const [fetchingClients, setFetchingClients] = useState(true);
   const [actionLoading, setActionLoading] = useState(null);
   const [personModal, setPersonModal] = useState(null); // { clientName, data }
+  const [shalomHealth, setShalomHealth] = useState(null); // { ok, status, latency_ms, ... }
+  const [checkingHealth, setCheckingHealth] = useState(false);
   const navigate = useNavigate();
 
   const getHeaders = () => {
@@ -126,6 +128,26 @@ export default function AdminPanel() {
     }
   };
 
+  const checkShalomHealth = async () => {
+    setCheckingHealth(true);
+    const toastId = toast.loading('Verificando API de Shalom...');
+    try {
+      const res = await axios.get(`${API_BASE}/admin/health/shalom`, getHeaders());
+      setShalomHealth(res.data);
+      if (res.data.ok) {
+        toast.success(`Shalom operativa (${res.data.latency_ms} ms)`, { id: toastId });
+      } else {
+        toast.error(res.data.message || 'Shalom no está respondiendo', { id: toastId });
+      }
+    } catch (e) {
+      if (e.response?.status === 401) handleLogout();
+      setShalomHealth({ ok: false, status: 'down', message: e.message });
+      toast.error('No se pudo verificar Shalom: ' + (e.response?.data?.detail || e.message), { id: toastId });
+    } finally {
+      setCheckingHealth(false);
+    }
+  };
+
   const handleLogout = () => {
     localStorage.removeItem('admin_token');
     navigate('/login');
@@ -202,12 +224,44 @@ export default function AdminPanel() {
           <Key className="w-8 h-8 text-indigo-600" />
           <h1 className="text-3xl font-bold text-slate-800">Shalom Admin Portal</h1>
         </div>
-        <button 
-          onClick={handleLogout}
-          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-        >
-          <LogOut className="w-4 h-4" /> Cerrar Sesión
-        </button>
+        <div className="flex items-center gap-3">
+          {shalomHealth && (
+            <span
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold ${
+                shalomHealth.ok
+                  ? 'bg-emerald-50 text-emerald-700'
+                  : shalomHealth.status === 'degraded'
+                  ? 'bg-amber-50 text-amber-700'
+                  : 'bg-red-50 text-red-700'
+              }`}
+              title={shalomHealth.message}
+            >
+              <span className={`w-2 h-2 rounded-full ${
+                shalomHealth.ok ? 'bg-emerald-500' : shalomHealth.status === 'degraded' ? 'bg-amber-500' : 'bg-red-500'
+              }`}></span>
+              {shalomHealth.ok
+                ? `Shalom operativa · ${shalomHealth.latency_ms} ms`
+                : shalomHealth.status === 'degraded'
+                ? `Shalom degradada (HTTP ${shalomHealth.upstream_status})`
+                : 'Shalom caída'}
+            </span>
+          )}
+          <button
+            onClick={checkShalomHealth}
+            disabled={checkingHealth}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-50"
+            title="Verificar si la API de Shalom está operativa"
+          >
+            {checkingHealth ? <Loader2 className="w-4 h-4 animate-spin" /> : <Activity className="w-4 h-4" />}
+            Verificar Shalom
+          </button>
+          <button
+            onClick={handleLogout}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+          >
+            <LogOut className="w-4 h-4" /> Cerrar Sesión
+          </button>
+        </div>
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 mb-8">
