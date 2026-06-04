@@ -143,6 +143,7 @@ def test_session_error_relogin_fails():
         r = call_proxy("/register-individual")
     assert r.status_code == 401, r.text
     err = r.json()["error"]
+    assert err["origin"] == "shalom"
     assert err["source"] == "shalom_session"
     assert err["code"] == "AUTOLOGIN_FAILED"
     assert err["recovery_attempted"] is True
@@ -317,11 +318,33 @@ def test_health_shalom_timeout_is_down():
 #  Errores del propio proxy (tag proxy_*)
 # ─────────────────────────────────────────────
 def test_missing_api_key():
-    """Sin x-api-key → proxy_auth 401."""
+    """Sin x-api-key → proxy_auth 401, origin backend."""
     r = call_proxy("/track", api_key=None)
     assert r.status_code == 401
+    assert r.json()["error"]["origin"] == "backend"
     assert r.json()["error"]["source"] == "proxy_auth"
     assert r.json()["error"]["code"] == "MISSING_API_KEY"
+
+
+def test_origin_separation():
+    """origin separa binariamente: proxy_* → backend, shalom_* → shalom."""
+    # error nuestro (DB) → backend
+    def boom(_):
+        raise RuntimeError("x")
+    orig = main.database.get_client_by_api_key
+    main.database.get_client_by_api_key = boom
+    try:
+        mine = call_proxy("/track")
+    finally:
+        main.database.get_client_by_api_key = orig
+    assert mine.json()["error"]["origin"] == "backend"
+
+    # error del tercero (Shalom 503 envuelto) → shalom
+    post, _ = _dispatch(login_result=_resp(200, {}),
+                        register_results=[_resp(500, {"error": "API_HTTP_ERROR: 503"})])
+    with mock.patch.object(main.requests, "post", side_effect=post):
+        theirs = call_proxy("/track")
+    assert theirs.json()["error"]["origin"] == "shalom"
 
 
 def test_blocked_login_path():

@@ -156,8 +156,10 @@ def extract_sender_documents_from_track_massive(response_data: dict) -> list[str
 # ─────────────────────────────────────────────
 #  Modelo unificado de errores
 #
-#  TODO error de la API sale con el MISMO formato y un TAG de origen
-#  (`error.source`) que dice de quién es la culpa. Dos grandes familias:
+#  TODO error sale con el MISMO formato y DOS niveles de atribución:
+#    - error.origin → separación binaria: "backend" (NUESTRO) | "shalom" (TERCERO)
+#    - error.source → el detalle fino dentro de esa familia
+#  Así el cliente sabe de un vistazo de quién es la culpa, y con el detalle si quiere.
 #
 #  NUESTRO backend (proxy / Lambda / DynamoDB):
 #    - proxy_auth      → el llamador no está autenticado/autorizado. 401/403.
@@ -254,12 +256,23 @@ def _extract_message(payload: Any, default: str) -> str:
     return default
 
 
+# Separación de PRIMER nivel: ¿de quién es la culpa?
+#   - "backend" → NUESTRO sistema (proxy / Lambda / DynamoDB / reglas propias)
+#   - "shalom"  → el TERCERO (la API de Shalom)
+# El `source` da el detalle fino; el `origin` da la respuesta binaria de un vistazo.
+def _origin_for_source(source: str) -> str:
+    return "shalom" if source.startswith("shalom") else "backend"
+
+
 def _error_envelope(source: str, code: str, message: str, path: str,
                     http_status: int, upstream_status: Optional[int] = None,
                     recovery_attempted: Optional[bool] = None) -> JSONResponse:
     """Construye la respuesta de error tipada con el status HTTP elegido."""
+    origin = _origin_for_source(source)
     err = {
-        "source": source,
+        "origin": origin,  # "backend" (mío) | "shalom" (tercero) — separación de 1er nivel
+        "origin_label": "Tu sistema (backend)" if origin == "backend" else "Tercero (Shalom)",
+        "source": source,  # detalle fino: proxy_auth, shalom_down, etc.
         "code": code,
         "message": message,
         "path": path,
