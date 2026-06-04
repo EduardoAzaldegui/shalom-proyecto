@@ -222,42 +222,83 @@ def test_invalid_api_key_still_401():
 
 
 # ─────────────────────────────────────────────
-#  Health-check de Shalom (botón del panel admin)
+#  Detección de Shalom caído envuelto en HTTP 500 (API_HTTP_ERROR: 503)
 # ─────────────────────────────────────────────
-def test_health_up():
-    """Shalom responde 200 → ok=True, status=up, con latencia."""
-    with mock.patch.object(main.requests, "get", return_value=_resp(200, {"data": []})):
+def test_wrapped_503_classified_as_shalom_down():
+    """Shalom devuelve HTTP 500 con {"error":"API_HTTP_ERROR: 503"} → shalom_down (503)."""
+    post, _ = _dispatch(
+        login_result=_resp(200, {}),
+        register_results=[_resp(500, {"error": "API_HTTP_ERROR: 503"})],
+    )
+    with mock.patch.object(main.requests, "post", side_effect=post):
+        r = call_proxy("/track")
+    assert r.status_code == 503, r.text
+    err = r.json()["error"]
+    assert err["source"] == "shalom_down"
+    assert err["code"] == "UPSTREAM_UNAVAILABLE"
+    assert err["upstream_status"] == 500
+
+
+# ─────────────────────────────────────────────
+#  Health-check de Shalom (botón del panel admin) — probe dual
+# ─────────────────────────────────────────────
+def _health_dispatch(list_resp, track_resp):
+    """get → /list ; post → /track. Acepta respuesta o excepción."""
+    def _get(url, **kw):
+        if isinstance(list_resp, Exception):
+            raise list_resp
+        return list_resp
+    def _post(url, **kw):
+        if isinstance(track_resp, Exception):
+            raise track_resp
+        return track_resp
+    return _get, _post
+
+
+def test_health_all_up():
+    """API 200 + tracking responde (not found) → ok=True, status=up."""
+    g, p = _health_dispatch(_resp(200, {"data": []}),
+                            _resp(200, {"success": False, "message": "no encontrado"}))
+    with mock.patch.object(main.requests, "get", side_effect=g), \
+         mock.patch.object(main.requests, "post", side_effect=p):
         out = main.shalom_health(is_admin=True)
     assert out["ok"] is True
     assert out["status"] == "up"
-    assert out["upstream_status"] == 200
-    assert isinstance(out["latency_ms"], int)
+    assert out["services"] == {"api": "up", "tracking": "up"}
 
 
-def test_health_down_on_gateway_error():
-    """Shalom responde 503 → ok=False, status=down."""
-    with mock.patch.object(main.requests, "get", return_value=_resp(503, {"m": "x"})):
-        out = main.shalom_health(is_admin=True)
-    assert out["ok"] is False
-    assert out["status"] == "down"
-    assert out["upstream_status"] == 503
-
-
-def test_health_degraded_on_4xx():
-    """Shalom responde 401 (no gateway) → status=degraded."""
-    with mock.patch.object(main.requests, "get", return_value=_resp(401, {"m": "x"})):
+def test_health_tracking_down_is_degraded():
+    """API 200 pero tracking 500/API_HTTP_ERROR:503 → degraded (lo que pasó en prod)."""
+    g, p = _health_dispatch(_resp(200, {"data": []}),
+                            _resp(500, {"error": "API_HTTP_ERROR: 503"}))
+    with mock.patch.object(main.requests, "get", side_effect=g), \
+         mock.patch.object(main.requests, "post", side_effect=p):
         out = main.shalom_health(is_admin=True)
     assert out["ok"] is False
     assert out["status"] == "degraded"
+    assert out["services"]["api"] == "up"
+    assert out["services"]["tracking"] == "down"
 
 
-def test_health_down_on_timeout():
-    """Timeout al pingear → status=down."""
-    with mock.patch.object(main.requests, "get", side_effect=requests.exceptions.Timeout()):
+def test_health_api_down():
+    """/list 503 → api down → status=down."""
+    g, p = _health_dispatch(_resp(503, {"m": "x"}), _resp(200, {"success": False}))
+    with mock.patch.object(main.requests, "get", side_effect=g), \
+         mock.patch.object(main.requests, "post", side_effect=p):
         out = main.shalom_health(is_admin=True)
     assert out["ok"] is False
     assert out["status"] == "down"
-    assert out["upstream_status"] is None
+    assert out["services"]["api"] == "down"
+
+
+def test_health_down_on_timeout():
+    """Timeout en ambos probes → status=down."""
+    g, p = _health_dispatch(requests.exceptions.Timeout(), requests.exceptions.Timeout())
+    with mock.patch.object(main.requests, "get", side_effect=g), \
+         mock.patch.object(main.requests, "post", side_effect=p):
+        out = main.shalom_health(is_admin=True)
+    assert out["ok"] is False
+    assert out["status"] == "down"
 
 
 if __name__ == "__main__":

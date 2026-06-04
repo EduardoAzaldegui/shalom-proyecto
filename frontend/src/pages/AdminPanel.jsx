@@ -242,7 +242,7 @@ export default function AdminPanel() {
               {shalomHealth.ok
                 ? `Shalom operativa · ${shalomHealth.latency_ms} ms`
                 : shalomHealth.status === 'degraded'
-                ? `Shalom degradada (HTTP ${shalomHealth.upstream_status})`
+                ? 'Shalom degradada · tracking caído'
                 : 'Shalom caída'}
             </span>
           )}

@@ -207,6 +207,31 @@ def _is_session_error(status_code: int, payload: Any) -> bool:
     return any(marker in text for marker in _SESSION_ERROR_MARKERS)
 
 
+# Marcadores que indican que un servicio interno de Shalom está caído, incluso
+# cuando Shalom envuelve el fallo en un HTTP 500 (ej: {"error":"API_HTTP_ERROR: 503"}).
+_DOWN_MARKERS = (
+    "api_http_error: 502",
+    "api_http_error: 503",
+    "api_http_error: 504",
+    "service unavailable",
+    "temporarily unavailable",
+    "bad gateway",
+    "gateway timeout",
+)
+
+
+def _is_upstream_down(status_code: int, payload: Any) -> bool:
+    """
+    True si Shalom (o un servicio interno suyo) está caído / no disponible.
+    Cubre tanto los gateway errors directos (502/503/504) como el caso en que
+    Shalom devuelve HTTP 500 envolviendo un 5xx de su backend real.
+    """
+    if status_code in (502, 503, 504):
+        return True
+    text = _payload_text(payload)
+    return any(marker in text for marker in _DOWN_MARKERS)
+
+
 def _extract_message(payload: Any, default: str) -> str:
     """Extrae el mensaje legible del body de error de Shalom."""
     if isinstance(payload, dict):
@@ -295,8 +320,10 @@ def _classify_shalom_error(resp, payload: Any, path: str,
             recovery_attempted=recovery_attempted,
         )
 
-    # 2. Shalom caído / no responde correctamente (gateway errors).
-    if status in (502, 503, 504):
+    # 2. Shalom caído / no responde correctamente. Incluye el caso en que Shalom
+    #    envuelve un 5xx de su backend real dentro de un HTTP 500
+    #    (ej: {"error": "API_HTTP_ERROR: 503"}).
+    if _is_upstream_down(status, payload):
         return _error_envelope(
             source="shalom_down",
             code="UPSTREAM_UNAVAILABLE",
@@ -535,51 +562,78 @@ def get_client_shalom_user(client_id: str, is_admin: bool = Depends(verify_admin
 #  Permite al admin verificar desde el panel si Shalom está vivo,
 #  midiendo latencia real contra un endpoint liviano con la master key.
 # ─────────────────────────────────────────────
-@app.get("/admin/health/shalom")
-def shalom_health(is_admin: bool = Depends(verify_admin_token)):
-    """
-    Hace un ping real a la API de Shalom (GET /list con la master key) y
-    reporta si está operativa, con latencia y status del upstream.
-    No es un problema del proxy ni de los clientes: refleja SOLO a Shalom.
-    """
+def _probe_shalom(method: str, path: str, body: Optional[dict] = None) -> dict:
+    """Hace un probe a un endpoint de Shalom y reporta up/down + latencia."""
     started = time.time()
     headers = {"x-api-key": SHALOM_API_KEY_MASTER, "Content-Type": "application/json"}
     try:
-        resp = requests.get(f"{SHALOM_API_URL}/list", headers=headers, timeout=8)
+        if method == "GET":
+            resp = requests.get(f"{SHALOM_API_URL}{path}", headers=headers, timeout=8)
+        else:
+            resp = requests.post(f"{SHALOM_API_URL}{path}", headers=headers, json=body or {}, timeout=8)
         latency_ms = round((time.time() - started) * 1000)
-        if resp.status_code == 200:
-            return {
-                "ok": True,
-                "status": "up",
-                "upstream_status": 200,
-                "latency_ms": latency_ms,
-                "url": SHALOM_API_URL,
-                "message": "Shalom está operativa.",
-            }
-        # Respondió pero con error → degradado/caído según el código.
-        is_down = resp.status_code in (502, 503, 504)
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = resp.text
+        # "Caído" = gateway error directo, o 5xx envuelto (API_HTTP_ERROR: 503),
+        # o un item de lote con ese error.
+        down = _is_upstream_down(resp.status_code, payload)
+        if isinstance(payload, list):
+            down = down or any(
+                isinstance(it, dict) and _is_upstream_down(200, it) for it in payload
+            )
+        if resp.status_code >= 500 and not down:
+            down = True
         return {
-            "ok": False,
-            "status": "down" if is_down else "degraded",
+            "status": "down" if down else "up",
             "upstream_status": resp.status_code,
             "latency_ms": latency_ms,
-            "url": SHALOM_API_URL,
-            "message": f"Shalom respondió con HTTP {resp.status_code}.",
         }
     except requests.exceptions.Timeout:
-        return {
-            "ok": False, "status": "down", "upstream_status": None,
-            "latency_ms": round((time.time() - started) * 1000),
-            "url": SHALOM_API_URL,
-            "message": "Shalom no respondió a tiempo (timeout). Puede estar caída o saturada.",
-        }
+        return {"status": "down", "upstream_status": None,
+                "latency_ms": round((time.time() - started) * 1000), "reason": "timeout"}
     except requests.exceptions.RequestException as e:
-        return {
-            "ok": False, "status": "down", "upstream_status": None,
-            "latency_ms": round((time.time() - started) * 1000),
-            "url": SHALOM_API_URL,
-            "message": f"No se pudo conectar con Shalom: {e}",
-        }
+        return {"status": "down", "upstream_status": None,
+                "latency_ms": round((time.time() - started) * 1000), "reason": str(e)}
+
+
+@app.get("/admin/health/shalom")
+def shalom_health(is_admin: bool = Depends(verify_admin_token)):
+    """
+    Health-check real de Shalom. Prueba DOS subsistemas, porque /list puede
+    estar arriba mientras el motor de tracking está caído:
+      - api:      GET /list           → ¿responde la API de Shalom?
+      - tracking: POST /track (dummy) → ¿funciona el motor de rastreo?
+    Un 'not found' en tracking cuenta como UP (el servicio respondió bien);
+    solo un 5xx / API_HTTP_ERROR cuenta como DOWN.
+    No refleja al proxy ni a los clientes: es el estado de Shalom.
+    """
+    api = _probe_shalom("GET", "/list")
+    tracking = _probe_shalom("POST", "/track", {"orderNumber": "00000000", "orderCode": "PING"})
+
+    services = {"api": api["status"], "tracking": tracking["status"]}
+    all_up = api["status"] == "up" and tracking["status"] == "up"
+
+    if all_up:
+        status, message = "up", "Shalom está operativa."
+    elif api["status"] == "up" and tracking["status"] == "down":
+        status = "degraded"
+        message = ("La API de Shalom responde, pero su motor de tracking está caído "
+                   "(devuelve 503). El rastreo, etiquetas y tickets no van a funcionar "
+                   "hasta que Shalom lo restablezca.")
+    else:
+        status, message = "down", "Shalom no está respondiendo."
+
+    return {
+        "ok": all_up,
+        "status": status,
+        "services": services,
+        "latency_ms": max(api["latency_ms"], tracking["latency_ms"]),
+        "detail": {"api": api, "tracking": tracking},
+        "url": SHALOM_API_URL,
+        "message": message,
+    }
 
 
 # ─────────────────────────────────────────────
