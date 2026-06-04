@@ -25,6 +25,14 @@ export default function AdminPanel() {
     return { headers: { Authorization: `Bearer ${token}` } };
   };
 
+  // Lee el mensaje de error sin importar el formato: envelope tipado
+  // {error:{message}} (nuevo) o {detail} (HTTPException de FastAPI).
+  const errMsg = (e) =>
+    e.response?.data?.error?.message ||
+    e.response?.data?.detail ||
+    e.message ||
+    'Error desconocido';
+
   const fetchClients = async () => {
     try {
       const res = await axios.get(`${API_BASE}/admin/clients`, getHeaders());
@@ -61,7 +69,7 @@ export default function AdminPanel() {
       toast.success('¡Cliente creado e instanciado en Shalom exitosamente!', { id: toastId });
       fetchClients();
     } catch (e) {
-      toast.error(e.response?.data?.detail || e.message || 'Error al crear el cliente', { id: toastId });
+      toast.error(errMsg(e), { id: toastId });
     } finally {
       setLoading(false);
     }
@@ -75,7 +83,7 @@ export default function AdminPanel() {
       toast.success('Token regenerado exitosamente.', { id: toastId });
       fetchClients();
     } catch (e) {
-      toast.error(e.response?.data?.detail || e.message || 'Error al regenerar token', { id: toastId });
+      toast.error(errMsg(e), { id: toastId });
     } finally {
       setActionLoading(null);
     }
@@ -91,7 +99,7 @@ export default function AdminPanel() {
       toast.success(`Cliente ${actionName}do exitosamente.`, { id: toastId });
       fetchClients();
     } catch (e) {
-      toast.error(`Error al ${actionName} el cliente: ` + (e.response?.data?.detail || e.message), { id: toastId });
+      toast.error(`Error al ${actionName} el cliente: ` + errMsg(e), { id: toastId });
     } finally {
       setActionLoading(null);
     }
@@ -105,7 +113,7 @@ export default function AdminPanel() {
       toast.success('Cliente eliminado permanentemente.', { id: toastId });
       fetchClients();
     } catch (e) {
-      toast.error('Error eliminando cliente: ' + (e.response?.data?.detail || e.message), { id: toastId });
+      toast.error('Error eliminando cliente: ' + errMsg(e), { id: toastId });
     } finally {
       setActionLoading(null);
     }
@@ -122,7 +130,7 @@ export default function AdminPanel() {
       const res = await axios.get(`${API_BASE}/admin/clients/${clientId}/user`, getHeaders());
       setPersonModal({ clientName, data: res.data });
     } catch (e) {
-      toast.error('No se pudo obtener los datos del remitente: ' + (e.response?.data?.detail || e.message));
+      toast.error('No se pudo obtener los datos del remitente: ' + errMsg(e));
     } finally {
       setActionLoading(null);
     }
@@ -130,19 +138,32 @@ export default function AdminPanel() {
 
   const checkShalomHealth = async () => {
     setCheckingHealth(true);
-    const toastId = toast.loading('Verificando API de Shalom...');
+    const toastId = toast.loading('Verificando backend y Shalom...');
     try {
       const res = await axios.get(`${API_BASE}/admin/health/shalom`, getHeaders());
       setShalomHealth(res.data);
-      if (res.data.ok) {
-        toast.success(`Shalom operativa (${res.data.latency_ms} ms)`, { id: toastId });
-      } else {
-        toast.error(res.data.message || 'Shalom no está respondiendo', { id: toastId });
-      }
+      if (res.data.ok) toast.success('Todo operativo: backend y Shalom', { id: toastId });
+      else toast.error(res.data.message || 'Hay un problema', { id: toastId });
     } catch (e) {
-      if (e.response?.status === 401) handleLogout();
-      setShalomHealth({ ok: false, status: 'down', message: e.message });
-      toast.error('No se pudo verificar Shalom: ' + (e.response?.data?.detail || e.message), { id: toastId });
+      if (e.response?.status === 401) { handleLogout(); return; }
+      if (!e.response) {
+        // Sin respuesta = ni siquiera tu backend (Lambda/API Gateway) contesta.
+        setShalomHealth({
+          ok: false,
+          backend: { status: 'down', components: { lambda: 'down', dynamodb: 'unknown' } },
+          shalom: { status: 'unknown' },
+          message: 'Tu backend no responde (Lambda/API Gateway inalcanzable). Shalom no se pudo evaluar.',
+        });
+        toast.error('Tu backend no responde', { id: toastId });
+      } else {
+        setShalomHealth({
+          ok: false,
+          backend: { status: 'degraded', components: {} },
+          shalom: { status: 'unknown' },
+          message: errMsg(e),
+        });
+        toast.error('Error: ' + errMsg(e), { id: toastId });
+      }
     } finally {
       setCheckingHealth(false);
     }
@@ -152,6 +173,25 @@ export default function AdminPanel() {
     localStorage.removeItem('admin_token');
     navigate('/login');
   };
+
+  // Estilos por estado para las pills de salud.
+  const pillCls = (s) =>
+    s === 'up' ? 'bg-emerald-50 text-emerald-700'
+    : s === 'degraded' ? 'bg-amber-50 text-amber-700'
+    : s === 'unknown' ? 'bg-slate-100 text-slate-500'
+    : 'bg-red-50 text-red-700';
+  const dotCls = (s) =>
+    s === 'up' ? 'bg-emerald-500'
+    : s === 'degraded' ? 'bg-amber-500'
+    : s === 'unknown' ? 'bg-slate-400'
+    : 'bg-red-500';
+
+  const HealthPill = ({ label, status }) => (
+    <span className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold ${pillCls(status)}`}>
+      <span className={`w-2 h-2 rounded-full ${dotCls(status)}`}></span>
+      {label}
+    </span>
+  );
 
   return (
     <div className="max-w-6xl mx-auto p-8">
@@ -226,34 +266,34 @@ export default function AdminPanel() {
         </div>
         <div className="flex items-center gap-3">
           {shalomHealth && (
-            <span
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold ${
-                shalomHealth.ok
-                  ? 'bg-emerald-50 text-emerald-700'
-                  : shalomHealth.status === 'degraded'
-                  ? 'bg-amber-50 text-amber-700'
-                  : 'bg-red-50 text-red-700'
-              }`}
-              title={shalomHealth.message}
-            >
-              <span className={`w-2 h-2 rounded-full ${
-                shalomHealth.ok ? 'bg-emerald-500' : shalomHealth.status === 'degraded' ? 'bg-amber-500' : 'bg-red-500'
-              }`}></span>
-              {shalomHealth.ok
-                ? `Shalom operativa · ${shalomHealth.latency_ms} ms`
-                : shalomHealth.status === 'degraded'
-                ? 'Shalom degradada · tracking caído'
-                : 'Shalom caída'}
-            </span>
+            <div className="flex items-center gap-2" title={shalomHealth.message}>
+              <HealthPill
+                label={
+                  shalomHealth.backend?.status === 'up' ? 'Backend OK'
+                  : shalomHealth.backend?.status === 'degraded' ? 'Backend · DB caída'
+                  : 'Backend caído'
+                }
+                status={shalomHealth.backend?.status}
+              />
+              <HealthPill
+                label={
+                  shalomHealth.shalom?.status === 'up' ? 'Shalom OK'
+                  : shalomHealth.shalom?.status === 'degraded' ? 'Shalom · tracking caído'
+                  : shalomHealth.shalom?.status === 'unknown' ? 'Shalom ?'
+                  : 'Shalom caída'
+                }
+                status={shalomHealth.shalom?.status}
+              />
+            </div>
           )}
           <button
             onClick={checkShalomHealth}
             disabled={checkingHealth}
             className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-50"
-            title="Verificar si la API de Shalom está operativa"
+            title="Verificar el estado de tu backend y de la API de Shalom"
           >
             {checkingHealth ? <Loader2 className="w-4 h-4 animate-spin" /> : <Activity className="w-4 h-4" />}
-            Verificar Shalom
+            Verificar estado
           </button>
           <button
             onClick={handleLogout}

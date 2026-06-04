@@ -31,6 +31,7 @@ _CLIENT = {
 fake_db.get_client_by_api_key = lambda key: _CLIENT if key == "client-key-abc" else None
 fake_db.get_client_by_token = lambda t: None
 fake_db.seed_admin = lambda: None
+fake_db.ping = lambda: (True, 3)
 sys.modules["database"] = fake_db
 
 # ── Stub de `mangum` (adaptador AWS Lambda, no necesario para tests) ──
@@ -255,50 +256,93 @@ def _health_dispatch(list_resp, track_resp):
     return _get, _post
 
 
+def _run_health(list_resp, track_resp, db=(True, 3)):
+    g, p = _health_dispatch(list_resp, track_resp)
+    orig_ping = main.database.ping
+    main.database.ping = lambda: db
+    try:
+        with mock.patch.object(main.requests, "get", side_effect=g), \
+             mock.patch.object(main.requests, "post", side_effect=p):
+            return main.shalom_health(is_admin=True)
+    finally:
+        main.database.ping = orig_ping
+
+
 def test_health_all_up():
-    """API 200 + tracking responde (not found) → ok=True, status=up."""
-    g, p = _health_dispatch(_resp(200, {"data": []}),
-                            _resp(200, {"success": False, "message": "no encontrado"}))
-    with mock.patch.object(main.requests, "get", side_effect=g), \
-         mock.patch.object(main.requests, "post", side_effect=p):
-        out = main.shalom_health(is_admin=True)
+    """Backend OK + API 200 + tracking responde → ok=True, todo up."""
+    out = _run_health(_resp(200, {"data": []}),
+                      _resp(200, {"success": False, "message": "no encontrado"}))
     assert out["ok"] is True
-    assert out["status"] == "up"
-    assert out["services"] == {"api": "up", "tracking": "up"}
+    assert out["backend"]["status"] == "up"
+    assert out["backend"]["components"]["dynamodb"] == "up"
+    assert out["shalom"]["status"] == "up"
+    assert out["shalom"]["services"] == {"api": "up", "tracking": "up"}
 
 
 def test_health_tracking_down_is_degraded():
-    """API 200 pero tracking 500/API_HTTP_ERROR:503 → degraded (lo que pasó en prod)."""
-    g, p = _health_dispatch(_resp(200, {"data": []}),
-                            _resp(500, {"error": "API_HTTP_ERROR: 503"}))
-    with mock.patch.object(main.requests, "get", side_effect=g), \
-         mock.patch.object(main.requests, "post", side_effect=p):
-        out = main.shalom_health(is_admin=True)
+    """API 200 pero tracking API_HTTP_ERROR:503 → shalom degraded (caso real de prod)."""
+    out = _run_health(_resp(200, {"data": []}), _resp(500, {"error": "API_HTTP_ERROR: 503"}))
     assert out["ok"] is False
-    assert out["status"] == "degraded"
-    assert out["services"]["api"] == "up"
-    assert out["services"]["tracking"] == "down"
+    assert out["backend"]["status"] == "up"
+    assert out["shalom"]["status"] == "degraded"
+    assert out["shalom"]["services"] == {"api": "up", "tracking": "down"}
 
 
-def test_health_api_down():
-    """/list 503 → api down → status=down."""
-    g, p = _health_dispatch(_resp(503, {"m": "x"}), _resp(200, {"success": False}))
-    with mock.patch.object(main.requests, "get", side_effect=g), \
-         mock.patch.object(main.requests, "post", side_effect=p):
-        out = main.shalom_health(is_admin=True)
+def test_health_shalom_down():
+    """/list 503 → shalom down (pero backend sigue OK)."""
+    out = _run_health(_resp(503, {"m": "x"}), _resp(200, {"success": False}))
     assert out["ok"] is False
-    assert out["status"] == "down"
-    assert out["services"]["api"] == "down"
+    assert out["backend"]["status"] == "up"
+    assert out["shalom"]["status"] == "down"
 
 
-def test_health_down_on_timeout():
-    """Timeout en ambos probes → status=down."""
-    g, p = _health_dispatch(requests.exceptions.Timeout(), requests.exceptions.Timeout())
-    with mock.patch.object(main.requests, "get", side_effect=g), \
-         mock.patch.object(main.requests, "post", side_effect=p):
-        out = main.shalom_health(is_admin=True)
+def test_health_backend_db_down():
+    """DynamoDB caído → backend degraded, ok=False (aunque Shalom esté perfecto)."""
+    out = _run_health(_resp(200, {"data": []}),
+                      _resp(200, {"success": False}), db=(False, 12))
     assert out["ok"] is False
-    assert out["status"] == "down"
+    assert out["backend"]["status"] == "degraded"
+    assert out["backend"]["components"]["dynamodb"] == "down"
+    assert "backend" in out["message"].lower()
+
+
+def test_health_shalom_timeout_is_down():
+    """Timeout en Shalom → shalom down, backend OK."""
+    out = _run_health(requests.exceptions.Timeout(), requests.exceptions.Timeout())
+    assert out["shalom"]["status"] == "down"
+    assert out["backend"]["status"] == "up"
+
+
+# ─────────────────────────────────────────────
+#  Errores del propio proxy (tag proxy_*)
+# ─────────────────────────────────────────────
+def test_missing_api_key():
+    """Sin x-api-key → proxy_auth 401."""
+    r = call_proxy("/track", api_key=None)
+    assert r.status_code == 401
+    assert r.json()["error"]["source"] == "proxy_auth"
+    assert r.json()["error"]["code"] == "MISSING_API_KEY"
+
+
+def test_blocked_login_path():
+    """/login bloqueado desde el proxy → proxy_request 403."""
+    r = call_proxy("/login")
+    assert r.status_code == 403
+    assert r.json()["error"]["source"] == "proxy_request"
+
+
+def test_db_down_returns_proxy_db():
+    """Si DynamoDB explota al validar la api-key → proxy_db 503."""
+    def boom(_):
+        raise RuntimeError("dynamo unreachable")
+    orig = main.database.get_client_by_api_key
+    main.database.get_client_by_api_key = boom
+    try:
+        r = call_proxy("/track")
+    finally:
+        main.database.get_client_by_api_key = orig
+    assert r.status_code == 503
+    assert r.json()["error"]["source"] == "proxy_db"
 
 
 if __name__ == "__main__":

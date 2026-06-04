@@ -192,3 +192,18 @@ def get_client_by_id(client_id):
     except Exception:
         return None
 
+def ping():
+    """
+    Chequeo liviano de conectividad con DynamoDB (dependencia de NUESTRO backend).
+    Hace un get_item barato contra la tabla admin. Devuelve (ok, latency_ms).
+    Se usa en el health-check para distinguir 'mi backend caído' de 'Shalom caído'.
+    """
+    import time as _time
+    started = _time.time()
+    try:
+        get_admin_table().get_item(Key={'username': 'admin'})
+        return True, round((_time.time() - started) * 1000)
+    except Exception as e:
+        print(f"[db] ping falló: {e}")
+        return False, round((_time.time() - started) * 1000)
+

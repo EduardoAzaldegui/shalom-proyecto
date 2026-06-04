@@ -154,17 +154,23 @@ def extract_sender_documents_from_track_massive(response_data: dict) -> list[str
 
 
 # ─────────────────────────────────────────────
-#  Clasificación y tipado de errores del proxy
+#  Modelo unificado de errores
 #
-#  Todo error que sale del proxy lleva un envelope con un TAG de origen
-#  (`error.source`) para que el cliente sepa de quién es la culpa:
-#    - shalom_session  → la sesión Shalom de esa instancia venció / auto-login
-#                        falló. Recuperable re-logueando. HTTP 401.
-#    - shalom_down      → Shalom no responde (timeout / conexión / 502/503/504).
-#                        HTTP 503/504. NO es culpa del cliente ni del proxy.
-#    - shalom_upstream  → Shalom respondió un error de negocio (4xx/5xx). Se
-#                        propaga el status real de Shalom.
-#    - proxy_internal   → error nuestro (DB, bug, etc.). HTTP 500.
+#  TODO error de la API sale con el MISMO formato y un TAG de origen
+#  (`error.source`) que dice de quién es la culpa. Dos grandes familias:
+#
+#  NUESTRO backend (proxy / Lambda / DynamoDB):
+#    - proxy_auth      → el llamador no está autenticado/autorizado. 401/403.
+#    - proxy_request   → el llamador mandó algo inválido (método, path bloqueado). 400/403.
+#    - proxy_db        → DynamoDB no responde. NUESTRA infra caída. 503.
+#    - proxy_internal  → bug nuestro / excepción no prevista. 500.
+#    - access_denied   → ownership: la guía no es del cliente. 403.
+#
+#  TERCERO (Shalom):
+#    - shalom_session  → sesión Shalom vencida / auto-login agotado. 401.
+#    - shalom_down     → Shalom (o un servicio interno suyo) caído. 503/504.
+#    - shalom_upstream → Shalom respondió un error de negocio (incl. not-found).
+#                        Se propaga su status real.
 # ─────────────────────────────────────────────
 
 # Marcadores que indican que la sesión Shalom expiró y el auto-login falló.
@@ -344,7 +350,38 @@ def _classify_shalom_error(resp, payload: Any, path: str,
     )
 
 
+def _classify_network_exception(exc: Exception, path: str) -> JSONResponse:
+    """Mapea una excepción de red contra Shalom a un envelope tipado."""
+    if isinstance(exc, requests.exceptions.Timeout):
+        return _error_envelope("shalom_down", "UPSTREAM_TIMEOUT",
+                               "Shalom no respondió a tiempo. Puede estar saturado o caído.",
+                               path, 504)
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return _error_envelope("shalom_down", "UPSTREAM_UNREACHABLE",
+                               "No se pudo conectar con Shalom. El servicio parece estar caído.",
+                               path, 503)
+    return _error_envelope("shalom_upstream", "UPSTREAM_REQUEST_FAILED",
+                           f"Fallo al comunicarse con Shalom: {exc}", path, 502)
+
+
 app = FastAPI(title="Shalom API Management Portal", version="2.0")
+
+
+# ─────────────────────────────────────────────
+#  Safety-net global: cualquier excepción NO prevista en cualquier endpoint
+#  sale como envelope tipado proxy_internal (500), nunca como el 500 crudo
+#  de FastAPI. Las HTTPException siguen su curso normal (las maneja FastAPI).
+# ─────────────────────────────────────────────
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request, exc):
+    print(f"[proxy] Excepción no manejada en {request.url.path}: {exc}")
+    return _error_envelope(
+        source="proxy_internal",
+        code="PROXY_INTERNAL_ERROR",
+        message="Error interno del proxy. No es un problema de Shalom.",
+        path=str(request.url.path),
+        http_status=500,
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -399,48 +436,89 @@ def create_client(client: ClientCreate, is_admin: bool = Depends(verify_admin_to
         "x-api-key": SHALOM_API_KEY_MASTER,
         "Content-Type": "application/json"
     }
+    path = "/admin/clients"
+
+    # 1. Crear instancia en Shalom (si Shalom está caído, lo decimos claro).
     try:
-        resp = requests.post(f"{SHALOM_API_URL}/instances", headers=headers, json={})
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("status") != "created":
-            raise HTTPException(status_code=400, detail="Failed to create instance in Shalom")
-        instance_id = data.get("instanceId")
-        api_key = data.get("apiKey")
-
-        # Perform initial login
-        login_payload = {
-            "instanceId": instance_id,
-            "username": client.shalom_username,
-            "password": client.shalom_password
-        }
-        login_resp = requests.post(f"{SHALOM_API_URL}/login", headers=headers, json=login_payload, timeout=15)
-        if login_resp.status_code not in (200, 201):
-            # Rollback instance
-            requests.delete(f"{SHALOM_API_URL}/instances", headers=headers, json={"instanceId": instance_id})
-            raise HTTPException(status_code=400, detail="Credenciales de Shalom inválidas.")
-
-        # Obtener datos del remitente (person) desde Shalom y almacenarlos
-        person_info = get_shalom_user_full(instance_id, SHALOM_API_KEY_MASTER)
-        person_name = person_info.get("full_name") if person_info else None
-        person_document = person_info.get("document") if person_info else None
-
-        client_id, magic_token = database.create_client(
-            client.name, client.email,
-            instance_id, api_key,
-            client.shalom_username, client.shalom_password,
-            person_name=person_name,
-            person_document=person_document
-        )
-        return {
-            "message": "Client created successfully",
-            "client_id": client_id,
-            "magic_token": magic_token,
-            "person_name": person_name,
-            "person_document": person_document,
-        }
+        resp = requests.post(f"{SHALOM_API_URL}/instances", headers=headers, json={}, timeout=15)
     except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Shalom API error: {str(e)}")
+        return _classify_network_exception(e, path)
+
+    if not resp.ok or _is_upstream_down(resp.status_code, _safe_json(resp)):
+        return _classify_shalom_error(resp, _safe_json(resp), path, recovery_attempted=False)
+
+    data = _safe_json(resp) or {}
+    if data.get("status") != "created":
+        return _error_envelope("shalom_upstream", "INSTANCE_NOT_CREATED",
+                               _extract_message(data, "Shalom no pudo crear la instancia."),
+                               path, 502, upstream_status=resp.status_code)
+
+    instance_id = data.get("instanceId")
+    api_key = data.get("apiKey")
+
+    # 2. Login inicial con las credenciales Shalom del cliente.
+    try:
+        login_resp = requests.post(f"{SHALOM_API_URL}/login", headers=headers,
+                                   json={"instanceId": instance_id,
+                                         "username": client.shalom_username,
+                                         "password": client.shalom_password}, timeout=15)
+    except requests.exceptions.RequestException as e:
+        # Rollback de la instancia recién creada y reporte tipado.
+        _rollback_instance(instance_id, headers)
+        return _classify_network_exception(e, path)
+
+    if login_resp.status_code not in (200, 201):
+        _rollback_instance(instance_id, headers)
+        # Credenciales inválidas = error de input del admin, no de Shalom ni nuestro.
+        if _is_upstream_down(login_resp.status_code, _safe_json(login_resp)):
+            return _classify_shalom_error(login_resp, _safe_json(login_resp), path, False)
+        return _error_envelope("proxy_request", "INVALID_SHALOM_CREDENTIALS",
+                               "Las credenciales de Shalom (usuario/contraseña) son inválidas.",
+                               path, 400, upstream_status=login_resp.status_code)
+
+    # 3. Datos del remitente + persistir en DynamoDB.
+    person_info = get_shalom_user_full(instance_id, SHALOM_API_KEY_MASTER)
+    person_name = person_info.get("full_name") if person_info else None
+    person_document = person_info.get("document") if person_info else None
+
+    try:
+        client_id, magic_token = database.create_client(
+            client.name, client.email, instance_id, api_key,
+            client.shalom_username, client.shalom_password,
+            person_name=person_name, person_document=person_document,
+        )
+    except Exception as e:
+        print(f"[db] create_client falló: {e}")
+        _rollback_instance(instance_id, headers)
+        return _error_envelope("proxy_db", "DB_WRITE_FAILED",
+                               "No se pudo guardar el cliente en la base de datos.", path, 503)
+
+    return {
+        "message": "Client created successfully",
+        "client_id": client_id,
+        "magic_token": magic_token,
+        "person_name": person_name,
+        "person_document": person_document,
+    }
+
+
+def _safe_json(resp):
+    """resp.json() que nunca explota: devuelve el dict/list, o el texto, o None."""
+    try:
+        return resp.json()
+    except Exception:
+        return resp.text or None
+
+
+def _rollback_instance(instance_id, headers):
+    """Borra una instancia recién creada en Shalom (best-effort, no propaga)."""
+    if not instance_id:
+        return
+    try:
+        requests.delete(f"{SHALOM_API_URL}/instances", headers=headers,
+                        json={"instanceId": instance_id}, timeout=10)
+    except Exception as e:
+        print(f"[rollback] No se pudo borrar la instancia {instance_id}: {e}")
 
 @app.get("/admin/clients")
 def list_clients(is_admin: bool = Depends(verify_admin_token)):
@@ -598,40 +676,72 @@ def _probe_shalom(method: str, path: str, body: Optional[dict] = None) -> dict:
                 "latency_ms": round((time.time() - started) * 1000), "reason": str(e)}
 
 
-@app.get("/admin/health/shalom")
-def shalom_health(is_admin: bool = Depends(verify_admin_token)):
+def _backend_health() -> dict:
     """
-    Health-check real de Shalom. Prueba DOS subsistemas, porque /list puede
-    estar arriba mientras el motor de tracking está caído:
-      - api:      GET /list           → ¿responde la API de Shalom?
-      - tracking: POST /track (dummy) → ¿funciona el motor de rastreo?
-    Un 'not found' en tracking cuenta como UP (el servicio respondió bien);
-    solo un 5xx / API_HTTP_ERROR cuenta como DOWN.
-    No refleja al proxy ni a los clientes: es el estado de Shalom.
+    Estado de NUESTRO backend. Si este código corre, Lambda está vivo (up).
+    Lo único que puede fallar por debajo es DynamoDB → lo pingueamos.
+    """
+    db_ok, db_latency = database.ping()
+    return {
+        "status": "up" if db_ok else "degraded",
+        "components": {
+            "lambda": "up",  # si responde, está vivo por definición
+            "dynamodb": "up" if db_ok else "down",
+        },
+        "latency_ms": db_latency,
+    }
+
+
+def _shalom_health() -> dict:
+    """
+    Estado del TERCERO (Shalom). Prueba 2 subsistemas independientes porque
+    /list puede estar arriba mientras el motor de tracking está caído.
     """
     api = _probe_shalom("GET", "/list")
     tracking = _probe_shalom("POST", "/track", {"orderNumber": "00000000", "orderCode": "PING"})
-
-    services = {"api": api["status"], "tracking": tracking["status"]}
-    all_up = api["status"] == "up" and tracking["status"] == "up"
-
-    if all_up:
-        status, message = "up", "Shalom está operativa."
-    elif api["status"] == "up" and tracking["status"] == "down":
-        status = "degraded"
-        message = ("La API de Shalom responde, pero su motor de tracking está caído "
-                   "(devuelve 503). El rastreo, etiquetas y tickets no van a funcionar "
-                   "hasta que Shalom lo restablezca.")
+    if api["status"] == "up" and tracking["status"] == "up":
+        status = "up"
+    elif api["status"] == "up":
+        status = "degraded"  # API viva, pero algún subsistema (tracking) caído
     else:
-        status, message = "down", "Shalom no está respondiendo."
-
+        status = "down"      # ni la API responde
     return {
-        "ok": all_up,
         "status": status,
-        "services": services,
+        "services": {"api": api["status"], "tracking": tracking["status"]},
         "latency_ms": max(api["latency_ms"], tracking["latency_ms"]),
         "detail": {"api": api, "tracking": tracking},
         "url": SHALOM_API_URL,
+    }
+
+
+@app.get("/admin/health/shalom")
+def shalom_health(is_admin: bool = Depends(verify_admin_token)):
+    """
+    Health-check del sistema COMPLETO, en dos capas separadas para que el admin
+    sepa de un vistazo de quién es el problema:
+      - backend → NUESTRA infra (Lambda + DynamoDB)
+      - shalom  → el TERCERO (su API + su motor de tracking)
+    """
+    backend = _backend_health()
+    shalom = _shalom_health()
+
+    if backend["status"] != "up":
+        message = ("⚠️ Problema en TU backend: DynamoDB no responde. "
+                   "Shalom puede estar bien, pero el portal no puede operar.")
+    elif shalom["status"] == "down":
+        message = ("Tu backend está OK. La API de Shalom NO responde (caída total). "
+                   "No es tu sistema — es el tercero.")
+    elif shalom["status"] == "degraded":
+        message = ("Tu backend está OK. La API de Shalom responde, pero su motor de "
+                   "tracking está caído (503): rastreo, etiquetas y tickets no funcionan "
+                   "hasta que Shalom lo restablezca. No es tu sistema.")
+    else:
+        message = "✅ Todo operativo: tu backend y Shalom funcionando correctamente."
+
+    return {
+        "ok": backend["status"] == "up" and shalom["status"] == "up",
+        "backend": backend,
+        "shalom": shalom,
         "message": message,
     }
 
@@ -658,26 +768,30 @@ def magic_login(payload: MagicLogin):
 
 @app.post("/auth/refresh-session")
 def refresh_shalom_session(payload: MagicLogin):
+    path = "/auth/refresh-session"
     client = database.get_client_by_token(payload.token)
     if not client:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    
-    headers = {
-        "x-api-key": SHALOM_API_KEY_MASTER,
-        "Content-Type": "application/json"
-    }
+        return _error_envelope("proxy_auth", "INVALID_TOKEN",
+                               "Magic token inválido o cliente desactivado.", path, 401)
+
+    headers = {"x-api-key": SHALOM_API_KEY_MASTER, "Content-Type": "application/json"}
     login_payload = {
         "instanceId": client.get("instance_id"),
         "username": client.get("shalom_username", ""),
-        "password": client.get("shalom_password", "")
+        "password": client.get("shalom_password", ""),
     }
     try:
         resp = requests.post(f"{SHALOM_API_URL}/login", headers=headers, json=login_payload, timeout=15)
-        if resp.status_code in (200, 201):
-            return {"success": True, "message": "Sesión de Shalom refrescada correctamente."}
-        raise HTTPException(status_code=400, detail="No se pudo refrescar la sesión en Shalom.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except requests.exceptions.RequestException as e:
+        return _classify_network_exception(e, path)
+
+    if resp.status_code in (200, 201):
+        return {"success": True, "message": "Sesión de Shalom refrescada correctamente."}
+    if _is_upstream_down(resp.status_code, _safe_json(resp)):
+        return _classify_shalom_error(resp, _safe_json(resp), path, False)
+    return _error_envelope("shalom_upstream", "REFRESH_FAILED",
+                           "No se pudo refrescar la sesión en Shalom (credenciales o cuenta).",
+                           path, 400, upstream_status=resp.status_code)
 
 
 # ─────────────────────────────────────────────
@@ -732,15 +846,28 @@ class ProxyRequest(BaseModel):
 
 @app.post("/proxy")
 def proxy_request(req: ProxyRequest, x_api_key: str = Header(None)):
-    if not x_api_key:
-        raise HTTPException(status_code=401, detail="Missing x-api-key header")
-
     req.path = req.path if req.path.startswith('/') else f"/{req.path}"
 
+    if not x_api_key:
+        return _error_envelope("proxy_auth", "MISSING_API_KEY",
+                               "Falta el header x-api-key.", req.path, 401)
+
+    if req.method.upper() not in ("GET", "POST"):
+        return _error_envelope("proxy_request", "METHOD_NOT_SUPPORTED",
+                               "Método no soportado. Usá 'get' o 'post'.", req.path, 400)
+
     # 1. Validar x-api-key contra la base de datos
-    client = database.get_client_by_api_key(x_api_key)
+    try:
+        client = database.get_client_by_api_key(x_api_key)
+    except Exception as e:
+        print(f"[db] get_client_by_api_key falló: {e}")
+        return _error_envelope("proxy_db", "DB_READ_FAILED",
+                               "La base de datos no responde. Reintentá en unos segundos.",
+                               req.path, 503)
     if not client:
-        raise HTTPException(status_code=401, detail="API Key inválida. Solicita credenciales válidas en tu portal.")
+        return _error_envelope("proxy_auth", "INVALID_API_KEY",
+                               "API Key inválida. Solicitá credenciales válidas en tu portal.",
+                               req.path, 401)
 
     # 2. Resolver qué API key usar
     api_key = SHALOM_API_KEY_MASTER if req.path in MASTER_KEY_PATHS else client["api_key"]
@@ -760,7 +887,9 @@ def proxy_request(req: ProxyRequest, x_api_key: str = Header(None)):
     
     # Bloquear acceso a /login y /logout desde el proxy
     if req.path in ["/login", "/logout"]:
-        raise HTTPException(status_code=403, detail="El proxy gestiona la autenticación automáticamente. Usa /refresh-session si necesitas renovar.")
+        return _error_envelope("proxy_request", "PATH_BLOCKED",
+                               "El proxy gestiona la autenticación automáticamente. "
+                               "Usá /auth/refresh-session si necesitás renovar.", req.path, 403)
 
     if req.path in INSTANCE_PATHS:
         body["instanceId"] = client.get("instance_id")
@@ -786,17 +915,16 @@ def proxy_request(req: ProxyRequest, x_api_key: str = Header(None)):
                         pre_data = pre_resp.json()
                         if pre_data.get("success") is False:
                             msg = pre_data.get("message") or pre_data.get("search", {}).get("message") or "La guía solicitada no fue encontrada en Shalom."
-                            raise HTTPException(status_code=404, detail=msg)
+                            return _error_envelope("shalom_upstream", "GUIA_NOT_FOUND",
+                                                   msg, req.path, 404, upstream_status=200)
 
                         remitente_doc = extract_sender_document_from_track(pre_data)
                         if remitente_doc and remitente_doc != sender_doc:
-                            raise HTTPException(
-                                status_code=403,
-                                detail="Acceso denegado: esta guía no pertenece a tu cuenta Shalom. "
-                                       "El remitente registrado no coincide con tu usuario."
-                            )
-                except HTTPException:
-                    raise
+                            return _error_envelope(
+                                "access_denied", "OWNERSHIP_DENIED",
+                                "Acceso denegado: esta guía no pertenece a tu cuenta Shalom. "
+                                "El remitente registrado no coincide con tu usuario.",
+                                req.path, 403)
                 except Exception as pre_err:
                     print(f"[ownership] WARNING: pre-check /track falló para {order_number}: {pre_err}")
 
@@ -806,9 +934,7 @@ def proxy_request(req: ProxyRequest, x_api_key: str = Header(None)):
     def _do_request():
         if req.method.upper() == "GET":
             return requests.get(url, headers=forward_headers, timeout=15)
-        elif req.method.upper() == "POST":
-            return requests.post(url, headers=forward_headers, json=body, timeout=15)
-        raise HTTPException(status_code=400, detail="Método no soportado.")
+        return requests.post(url, headers=forward_headers, json=body, timeout=15)
 
     try:
         resp = _do_request()
@@ -887,7 +1013,8 @@ def proxy_request(req: ProxyRequest, x_api_key: str = Header(None)):
                     shalom_error_msg = str(shalom_response["error"])
 
             if shalom_error_msg:
-                raise HTTPException(status_code=404, detail=shalom_error_msg)
+                return _error_envelope("shalom_upstream", "GUIA_NOT_FOUND",
+                                       shalom_error_msg, req.path, 404, upstream_status=200)
 
             if sender_doc:
                 if req.path == "/track-massive":
@@ -907,11 +1034,11 @@ def proxy_request(req: ProxyRequest, x_api_key: str = Header(None)):
                     # /track incluye el remitente directamente en su respuesta
                     remitente_doc = extract_sender_document_from_track(shalom_response)
                     if remitente_doc and remitente_doc != sender_doc:
-                        raise HTTPException(
-                            status_code=403,
-                            detail="Acceso denegado: esta guía no pertenece a tu cuenta Shalom. "
-                                   "El remitente registrado no coincide con tu usuario."
-                        )
+                        return _error_envelope(
+                            "access_denied", "OWNERSHIP_DENIED",
+                            "Acceso denegado: esta guía no pertenece a tu cuenta Shalom. "
+                            "El remitente registrado no coincide con tu usuario.",
+                            req.path, 403)
             else:
                 print(f"[ownership] WARNING: No se pudo verificar ownership para instance {instance_id}. Permitiendo request.")
 
@@ -919,32 +1046,11 @@ def proxy_request(req: ProxyRequest, x_api_key: str = Header(None)):
 
     except HTTPException:
         raise
-    except requests.exceptions.Timeout:
-        return _error_envelope(
-            source="shalom_down",
-            code="UPSTREAM_TIMEOUT",
-            message="Shalom no respondió a tiempo. Puede estar saturado o caído. Intentá de nuevo en unos minutos.",
-            path=req.path,
-            http_status=504,
-        )
-    except requests.exceptions.ConnectionError:
-        return _error_envelope(
-            source="shalom_down",
-            code="UPSTREAM_UNREACHABLE",
-            message="No se pudo conectar con Shalom. El servicio parece estar caído.",
-            path=req.path,
-            http_status=503,
-        )
     except requests.exceptions.RequestException as e:
-        return _error_envelope(
-            source="shalom_upstream",
-            code="UPSTREAM_REQUEST_FAILED",
-            message=f"Fallo al comunicarse con Shalom: {e}",
-            path=req.path,
-            http_status=502,
-        )
+        # Timeout / conexión / fallo de red contra Shalom → tipado shalom_down/upstream.
+        return _classify_network_exception(e, req.path)
     except Exception as e:
-        # Error nuestro (DB, bug, serialización…). Es el único caso 'proxy_internal'.
+        # Error nuestro (bug, serialización…). Único caso 'proxy_internal'.
         print(f"[proxy] ERROR interno en {req.path}: {e}")
         return _error_envelope(
             source="proxy_internal",
